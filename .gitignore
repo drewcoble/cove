@@ -1,0 +1,5 @@
+.DS_Store
+node_modules/
+*.log
+# Exported setups contain your real pinned URLs and tab names.
+cove-setup-*.json

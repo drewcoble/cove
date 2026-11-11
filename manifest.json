@@ -1,0 +1,107 @@
+{
+  "manifest_version": 3,
+  "name": "Cove",
+  "version": "0.1.0",
+  "description": "Vertical tabs for Chrome with spaces, pinned tabs that remember their home, shared Essentials and Peek.",
+  "minimum_chrome_version": "121",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "storage",
+    "sidePanel",
+    "favicon",
+    "search",
+    "offscreen",
+    "clipboardWrite",
+    "scripting",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "incognito": "not_allowed",
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/peek-trigger.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "Cove",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "_execute_action": {
+      "description": "Open the Cove sidebar"
+    },
+    "next-space": {
+      "suggested_key": {
+        "default": "Alt+Shift+Right",
+        "mac": "MacCtrl+Shift+Right"
+      },
+      "description": "Switch to the next space"
+    },
+    "prev-space": {
+      "suggested_key": {
+        "default": "Alt+Shift+Left",
+        "mac": "MacCtrl+Shift+Left"
+      },
+      "description": "Switch to the previous space"
+    },
+    "reset-pinned-tab": {
+      "description": "Send the current pinned tab / Essential back to its pinned URL"
+    },
+    "copy-url": {
+      "description": "Copy the current tab URL"
+    },
+    "space-1": {
+      "description": "Go to space 1"
+    },
+    "space-2": {
+      "description": "Go to space 2"
+    },
+    "space-3": {
+      "description": "Go to space 3"
+    },
+    "space-4": {
+      "description": "Go to space 4"
+    },
+    "space-5": {
+      "description": "Go to space 5"
+    },
+    "space-6": {
+      "description": "Go to space 6"
+    },
+    "space-7": {
+      "description": "Go to space 7"
+    },
+    "space-8": {
+      "description": "Go to space 8"
+    },
+    "space-9": {
+      "description": "Go to space 9"
+    }
+  }
+}

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cove</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header id="toolbar">
+      <div class="nav">
+        <button id="back" class="icon-btn" title="Back"></button>
+        <button id="forward" class="icon-btn" title="Forward"></button>
+        <button id="reload" class="icon-btn" title="Reload"></button>
+      </div>
+      <form id="urlbar" autocomplete="off">
+        <input id="url" spellcheck="false" placeholder="Search or enter address" />
+      </form>
+    </header>
+
+    <section id="essentials" class="zone"></section>
+
+    <main id="space">
+      <div id="space-inner">
+        <div id="space-header">
+          <span id="space-icon"></span>
+          <span id="space-name" title="Double-click to rename"></span>
+          <button id="space-menu" class="icon-btn sm" title="Space options"></button>
+        </div>
+        <div id="pins" class="zone list"></div>
+        <div id="divider">
+          <span class="line"></span>
+          <button id="clear" title="Close all unpinned tabs in this space">Clear</button>
+        </div>
+        <div id="new-tab" class="row">
+          <span class="fav"></span>
+          <span class="title">New Tab</span>
+        </div>
+        <div id="tabs" class="zone list"></div>
+      </div>
+    </main>
+
+    <footer id="bottombar">
+      <button id="settings" class="icon-btn" title="Settings"></button>
+      <div id="spaces"></div>
+      <button id="add-space" class="icon-btn" title="New space"></button>
+    </footer>
+
+    <div id="menu" hidden></div>
+    <div id="popover" hidden></div>
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
