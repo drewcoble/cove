@@ -987,7 +987,9 @@ function showToast(text) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
 }
-chrome.runtime.onMessage.addListener(msg => {
+const SERVICE_WORKER = chrome.runtime.getURL('src/background.js');
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (sender.url !== SERVICE_WORKER) return;
   if (msg?.target === 'panel' && msg.type === 'toast' && msg.windowId === windowId) showToast(msg.text);
 });
 

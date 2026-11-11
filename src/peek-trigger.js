@@ -6,11 +6,14 @@
 
 let enabled = true;
 
-chrome.storage.local.get('config').then(({ config }) => {
-  enabled = config?.settings?.peekOnAltClick ?? true;
+// Only the one setting this script needs is read here; it deliberately doesn't load the
+// config or listen to storage changes, either of which would put your pinned URLs into
+// every page. Live changes arrive as a message from the service worker.
+chrome.storage.local.get('peekOnAltClick').then(({ peekOnAltClick }) => {
+  enabled = peekOnAltClick ?? true;
 });
-chrome.storage.onChanged.addListener(changes => {
-  if (changes.config) enabled = changes.config.newValue?.settings?.peekOnAltClick ?? true;
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (sender.id === chrome.runtime.id && !sender.tab && msg?.type === 'peekPrefs') enabled = !!msg.peekOnAltClick;
 });
 
 // Rough registrable domain ("mail.google.com" -> "google.com", "bbc.co.uk" stays whole), so

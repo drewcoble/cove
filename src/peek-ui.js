@@ -36,6 +36,7 @@
       <button data-type="peekClose" title="Close (Esc)">${icon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>')}</button>
     </div>`;
   root.addEventListener('click', e => {
+    if (!e.isTrusted) return;
     const btn = e.target.closest('button');
     if (btn) send(btn.dataset.type);
   });
@@ -43,7 +44,8 @@
 
   // Bubble phase, so a page that handles Esc itself (closing its own modal) keeps it.
   window.addEventListener('keydown', e => {
-    if (!state.active) return;
+    // isTrusted: the page inside the Peek must not be able to close or keep it by faking keys.
+    if (!state.active || !e.isTrusted) return;
     if (e.key === 'Escape' && !e.defaultPrevented) send('peekClose');
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();

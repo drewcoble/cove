@@ -12,7 +12,7 @@
 // restarts but not browser restarts; on a fresh browser session `reconcile()` rebuilds it
 // from the restored tab groups and tab URLs.
 
-import { COLORS, newId, sameUrl, isDrifted, isWebUrl } from './shared.js';
+import { COLORS, newId, sameUrl, isDrifted, isWebUrl, redactUrl } from './shared.js';
 
 const SETTLE_GRACE_MS = 1500;
 const ACTIVATION_RACE_MS = 300;
@@ -57,6 +57,10 @@ function normalizeConfig(c) {
   cfg.essentials = (cfg.essentials ?? []).filter(id => cfg.pins[id]);
   if (!cfg.spaces?.length) cfg.spaces = defaultConfig().spaces;
   for (const s of cfg.spaces) s.pins = (s.pins ?? []).filter(id => cfg.pins[id]);
+  for (const pin of Object.values(cfg.pins)) {
+    pin.lastUrl = pin.lastUrl && redactUrl(pin.lastUrl);
+    pin.aliases = [...new Set((pin.aliases ?? []).map(redactUrl).filter(Boolean))];
+  }
   return cfg;
 }
 
@@ -73,7 +77,9 @@ async function flush() {
   const writes = [];
   if (dirtyConfig) {
     dirtyConfig = false;
-    writes.push(chrome.storage.local.set({ config }));
+    // peekOnAltClick is mirrored to its own key: peek-trigger.js runs on every site and reads
+    // only that, so your pinned URLs and names are never loaded into web pages.
+    writes.push(chrome.storage.local.set({ config, peekOnAltClick: !!config.settings.peekOnAltClick }));
   }
   if (dirtyRt) {
     dirtyRt = false;
@@ -87,9 +93,11 @@ const ready = (async () => {
     chrome.storage.local.get('config'),
     chrome.storage.session.get('rt'),
   ]);
+  const stored = JSON.stringify(c);
   config = normalizeConfig(c);
   rt = { ...emptyRt(), ...r };
-  if (!c) touchConfig();
+  if (!c || JSON.stringify(config) !== stored) touchConfig();
+  await chrome.storage.local.set({ peekOnAltClick: !!config.settings.peekOnAltClick });
   await reconcile().catch(e => console.error('[cove] reconcile failed', e));
   await flush();
 })();
@@ -253,7 +261,7 @@ const goodFavicon = u => (isWebUrl(u) || (u?.startsWith('data:') && u.length < 8
 
 function createPin(tab, spaceId, index) {
   const id = newId();
-  const url = tab.url || tab.pendingUrl || 'chrome://newtab/';
+  const url = redactUrl(tab.url || tab.pendingUrl, { keepHash: true }) || 'chrome://newtab/';
   config.pins[id] = {
     id,
     url,
@@ -262,7 +270,7 @@ function createPin(tab, spaceId, index) {
     favIconUrl: goodFavicon(tab.favIconUrl),
     aliases: [],
     spaceId,
-    lastUrl: url,
+    lastUrl: redactUrl(url),
   };
   insertAt(pinList(spaceId), id, index);
   touchConfig();
@@ -326,6 +334,7 @@ async function placePinTab(tab, spaceId) {
 }
 
 function addAlias(pin, url) {
+  url = redactUrl(url);
   if (!isWebUrl(url) || !isDrifted(pin, url)) return;
   pin.aliases = [url, ...(pin.aliases ?? [])].slice(0, MAX_ALIASES);
   touchConfig();
@@ -613,7 +622,7 @@ const handlers = {
   async setPinUrl({ pinId, url, title }) {
     const pin = config.pins[pinId];
     if (!pin || !url) return;
-    pin.url = url;
+    pin.url = redactUrl(url, { keepHash: true }) || url;
     pin.aliases = [];
     if (title) pin.defaultTitle = title;
     touchConfig();
@@ -653,7 +662,7 @@ const handlers = {
       format: SETUP_FORMAT,
       version: 1,
       exportedAt: new Date().toISOString(),
-      config: structuredClone({ spaces, essentials, pins, settings }),
+      config: normalizeConfig(structuredClone({ spaces, essentials, pins, settings })),
     };
   },
 
@@ -667,6 +676,7 @@ const handlers = {
     touchRt();
     await reconcile();
     for (const s of config.spaces) await syncGroupsForSpace(s);
+    broadcastPeekPrefs();
     return { spaces: config.spaces.length, pins: Object.keys(config.pins).length };
   },
 
@@ -674,6 +684,7 @@ const handlers = {
     Object.assign(config.settings, patch);
     touchConfig();
     if ('peekFromEssentials' in patch) for (const id of Object.keys(rt.tabPin)) syncEssentialFlag(+id);
+    if ('peekOnAltClick' in patch) broadcastPeekPrefs();
     if (!('collapseInactive' in patch)) return;
     if (patch.collapseInactive) {
       for (const w of await chrome.windows.getAll({ windowTypes: ['normal'] })) await applyCollapse(w.id);
@@ -693,7 +704,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!handler) return;
   const fromExtensionPage = sender.url?.startsWith(chrome.runtime.getURL(''));
   if (!fromExtensionPage && !CONTENT_SCRIPT_HANDLERS.has(msg.type)) return;
-  enqueue(() => handler(msg, sender)).then(
+  // A content script only ever acts on its own tab: drop any window/tab ids it passes.
+  const args = fromExtensionPage ? msg : { type: msg.type, url: msg.url };
+  enqueue(() => handler(args, sender)).then(
     result => sendResponse({ ok: true, result }),
     error => sendResponse({ ok: false, error: String(error?.message ?? error) }),
   );
@@ -791,8 +804,8 @@ async function onTabUpdated(tabId, ci) {
 
   if (!pin) return;
   const url = tab.url || tab.pendingUrl;
-  if ('url' in ci && url && pin.lastUrl !== url) {
-    pin.lastUrl = url;
+  if ('url' in ci && url && pin.lastUrl !== redactUrl(url)) {
+    pin.lastUrl = redactUrl(url);
     touchConfig();
   }
   const s = settling.get(tabId);
@@ -1014,6 +1027,14 @@ async function peekInsteadOfTab(tab) {
   await chrome.tabs.remove(tab.id).catch(() => {});
   await handlers.peek({ url, windowId: tab.windowId }, { tab: openerTab });
   return true;
+}
+
+// Pushes the Option-click setting to the content script in every open page (it reads the
+// peekOnAltClick key on load, and gets live changes this way rather than via storage events,
+// which would hand it the whole config).
+async function broadcastPeekPrefs() {
+  const msg = { type: 'peekPrefs', peekOnAltClick: !!config.settings.peekOnAltClick };
+  for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, msg).catch(() => {});
 }
 
 const isPeekTab = tabId => !!rt && (tabId in rt.tabPeeks || Object.values(rt.peeks).some(p => p.tabId === tabId));

@@ -129,6 +129,11 @@ try {
 
   await evalIn(ext, `chrome.runtime.sendMessage({ type: 'updateSettings', patch: { peekOnAltClick: false } }).then(() => 1)`);
   await sleep(500);
+  // The setting reaches an already-open page without a reload.
+  await click(page, x, y, 1);
+  await sleep(1200);
+  peeks = await evalIn(ext, `chrome.storage.session.get('rt').then(r => JSON.stringify(r.rt.peeks))`);
+  ok(peeks === '{}', 'turning Option-click off takes effect in pages that are already open');
   await evalIn(page, `location.href = '${base}/linkpage2'`);
   await sleep(1000);
   const page2 = await attachTo('/linkpage2');

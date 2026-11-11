@@ -138,8 +138,9 @@ node test/harness.mjs . test/migrate-export.js test/migrate-import.js
 ```
 
 Smaller checks, each run as `node test/harness.mjs . test/<file>`: `essentials-layout.js` (grid
-rows for 1–11 Essentials) and `popover-enter.js` (Enter in one popup must not re-run an earlier
-popup's action).
+rows for 1–11 Essentials), `popover-enter.js` (Enter in one popup must not re-run an earlier
+popup's action) and `security.js` (tokens kept out of storage and exports, and web pages unable to
+reach the clipboard, other windows' Peeks or your saved setup).
 
 ## License
 
