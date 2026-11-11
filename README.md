@@ -79,7 +79,26 @@ collapsed by default, so the strip only shows the current space (you can turn th
   Chrome won't assign it automatically because ⌘⇧C is also DevTools' Inspect shortcut. A ✓
   flashes on the toolbar icon, and the sidebar shows "Copied URL" if it's open.
 - Shortcuts can be changed at `chrome://extensions/shortcuts`. There's also an unbound
-  "reset pinned tab" command you can assign.
+  "reset pinned tab" command you can assign. See the recommended set below.
+
+## Recommended keyboard shortcuts
+
+Chrome only pre-assigns a few of these, so set them at `chrome://extensions/shortcuts` (macOS
+keys shown; leave **Scope** as *In Chrome*).
+
+| Command                                                  | Shortcut  |
+| -------------------------------------------------------- | --------- |
+| Activate the extension (opens the sidebar)               | ⌘S        |
+| Copy the current tab URL                                 | ⇧⌘C       |
+| Switch to the next space                                 | ⌘→        |
+| Switch to the previous space                             | ⌘←        |
+| Go to space 1 … 9                                        | ⌃1 … ⌃9   |
+| Send the current pinned tab / Essential back to its pinned URL | not set |
+
+Some of these replace Chrome's own shortcuts while Chrome is focused: ⌘S (Save Page As), ⇧⌘C
+(DevTools' Inspect), and ⌘←/⌘→ (Back/Forward, and jumping to the start/end of a line in text
+fields). ⌃1–⌃9 only reach Chrome if macOS's "Switch to Desktop" shortcuts are off (System
+Settings → Keyboard → Keyboard Shortcuts → Mission Control).
 
 ## Limits
 
