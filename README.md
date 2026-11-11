@@ -90,15 +90,15 @@ keys shown; leave **Scope** as *In Chrome*).
 | -------------------------------------------------------- | --------- |
 | Activate the extension (opens the sidebar)               | ⌘S        |
 | Copy the current tab URL                                 | ⇧⌘C       |
-| Switch to the next space                                 | ⌘→        |
-| Switch to the previous space                             | ⌘←        |
+| Switch to the next space                                 | ⇧⌘→       |
+| Switch to the previous space                             | ⇧⌘←       |
 | Go to space 1 … 9                                        | ⌃1 … ⌃9   |
 | Send the current pinned tab / Essential back to its pinned URL | not set |
 
 Some of these replace Chrome's own shortcuts while Chrome is focused: ⌘S (Save Page As), ⇧⌘C
-(DevTools' Inspect), and ⌘←/⌘→ (Back/Forward, and jumping to the start/end of a line in text
-fields). ⌃1–⌃9 only reach Chrome if macOS's "Switch to Desktop" shortcuts are off (System
-Settings → Keyboard → Keyboard Shortcuts → Mission Control).
+(DevTools' Inspect), and ⇧⌘←/⇧⌘→ (selecting to the start/end of a line in text fields). ⌃1–⌃9 only
+reach Chrome if macOS's "Switch to Desktop" shortcuts are off (System Settings → Keyboard →
+Keyboard Shortcuts → Mission Control).
 
 ## Limits
 
