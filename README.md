@@ -121,3 +121,7 @@ node test/harness.mjs . test/migrate-export.js test/migrate-import.js
 Smaller checks, each run as `node test/harness.mjs . test/<file>`: `essentials-layout.js` (grid
 rows for 1–11 Essentials) and `popover-enter.js` (Enter in one popup must not re-run an earlier
 popup's action).
+
+## License
+
+[MIT](LICENSE)
