@@ -210,7 +210,7 @@ export function createOrganizer(env) {
       { key: 'folder', label: 'New folder…', detail: 'Action', run: () => newFolder(spaceId) },
       { key: 'archive', label: 'View archive', detail: 'Action', run: () => open('archive'), keepOpen: true },
       { key: 'undo', label: 'Undo last close', detail: 'Restore a tab or cleared space', run: () => env.send('undoArchive', { windowId }) },
-      { key: 'clear', label: 'Archive unpinned tabs in this space', detail: 'Action · Can be undone', run: () => env.send('clearSpace', { windowId, spaceId }) },
+      { key: 'clear', label: 'Archive other unpinned tabs in this space', detail: 'Action · Can be undone', run: () => env.send('clearSpace', { windowId, spaceId }) },
     );
     const current = tabs.find(t => t.active);
     if (current) items.push({ key: 'pin', label: 'Pin current tab', detail: 'Action', run: () => env.send('pinTab', { tabId: current.id, spaceId }) });

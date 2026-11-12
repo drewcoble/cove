@@ -564,7 +564,7 @@ const handlers = {
 
   async clearSpace({ windowId, spaceId }) {
     const tabs = await chrome.tabs.query({ windowId });
-    const tabIds = tabs.filter(t => tabSpaceOf(t) === spaceId && !rt.tabPin[t.id]).map(t => t.id);
+    const tabIds = tabs.filter(t => tabSpaceOf(t) === spaceId && !t.active && !t.pinned && !rt.tabPin[t.id]).map(t => t.id);
     if (tabIds.length) await handlers.closeTabs({ windowId, tabIds });
   },
 

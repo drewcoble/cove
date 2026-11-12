@@ -67,7 +67,7 @@ collapsed by default, so the strip only shows the current space (you can turn th
   Chrome's tab strip. You can still collapse the folder manually until the tab is selected
   or navigated again. Moving a pin to another space clears its folder membership.
 - **Archive and undo:** ordinary tabs closed from the sidebar or Chrome's tab strip go
-  into the archive. **Clear** archives the space's unpinned tabs as one batch. Click **Undo**
+  into the archive. **Clear** archives the space's other unpinned tabs as one batch, keeping the tab you are viewing. Click **Undo**
   in the notification, use **Undo last close** in the command bar/archive, or press
   `Alt+Shift+Z` (`Option+Shift+Z` on macOS) to restore the last batch from this window.
   The ↶ button at the bottom opens the searchable archive; click a result to restore it
@@ -96,7 +96,7 @@ collapsed by default, so the strip only shows the current space (you can turn th
   (including background Cmd/Ctrl-clicks) join the current space as well. Same-site navigation,
   such as reading an email, stays in the Essential. Links arriving from other apps also stay
   regular tabs. Option-click still explicitly opens Peek.
-- Middle-click closes a tab or unloads a pin. **Clear** on the divider closes the space's unpinned tabs.
+- Middle-click closes a tab or unloads a pin. **Clear** on the divider archives the space's other unpinned tabs and keeps the current tab.
 - **Jump to a space by number:** "Go to space 1–9" commands exist but have no default keys
   (Chrome lets an extension suggest only 4). Bind them yourself at `chrome://extensions/shortcuts`,
   e.g. ⌃1, ⌃2, ⌃3 like Zen. Hovering a space dot shows its shortcut once it's bound.
