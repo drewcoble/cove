@@ -722,7 +722,6 @@ async function onTabCreated(tabId) {
   const tab = await getTab(tabId);
   if (!tab || !(await isNormalWindow(tab.windowId))) return;
   if (rt.tabPeeks[tab.id]?.split) return;
-  if (await peekInsteadOfTab(tab)) return;
   if (tab.pinned) {
     if (!rt.tabPin[tab.id]) bindTab(tab.id, createPin(tab, null).id);
     return;
@@ -1005,14 +1004,25 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => 
 // into a regular tab in the space it was opened from. A popup window (not an iframe overlay)
 // keeps logins working and isn't blocked by sites that refuse to be framed.
 
-// Links from Essentials open in Peek: a foreground tab spawned by an Essential (email
-// links, target=_blank, window.open) becomes a Peek, leaving the Essential where it was.
+// Links from Essentials open in Peek: a foreground tab the Essential's page opened itself
+// (email links, target=_blank, window.open) becomes a Peek, leaving the Essential where it was.
 // Background tabs (⌘-click) are left alone.
-async function peekInsteadOfTab(tab) {
-  const opener = tab.openerTabId != null ? config.pins[rt.tabPin[tab.openerTabId]] : null;
+//
+// "Opened by the Essential" comes from webNavigation, not tab.openerTabId: Chrome can also give
+// a tab the active tab as its opener when a link arrives from another app (Slack, Mail), and
+// those must open as normal tabs. webNavigation only reports a source tab when a page opened it.
+chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId, url }) =>
+  enqueue(async () => {
+    const tab = await getTab(tabId);
+    if (tab && (await isNormalWindow(tab.windowId))) await peekInsteadOfTab(tab, sourceTabId, url);
+  }),
+);
+
+async function peekInsteadOfTab(tab, sourceTabId, targetUrl) {
+  const opener = config.pins[rt.tabPin[sourceTabId]];
   if (!config.settings.peekFromEssentials || !tab.active || !opener || opener.spaceId != null) return false;
-  const url = tab.pendingUrl || tab.url;
-  const openerTab = await getTab(tab.openerTabId);
+  const url = tab.pendingUrl || tab.url || targetUrl;
+  const openerTab = await getTab(sourceTabId);
   // A duplicate of the Essential itself isn't "following a link".
   if (!isWebUrl(url) || !openerTab || sameUrl(url, openerTab.url)) return false;
   const fullscreen = (await chrome.windows.get(tab.windowId).catch(() => null))?.state === 'fullscreen';

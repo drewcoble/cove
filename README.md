@@ -70,7 +70,9 @@ collapsed by default, so the strip only shows the current space (you can turn th
 - **Links from Essentials open in Peek**, so your inbox stays put behind it and closing the Peek
   brings you straight back. That covers links that would open a new tab, and links to a different
   site that would navigate the Essential away. Links within the same site (opening an email) and
-  ⌘-clicks (background tabs) behave normally. You can turn this off in settings.
+  ⌘-clicks (background tabs) behave normally, and links arriving from other apps (Slack, Mail)
+  always open as normal tabs, even while an Essential is the active tab. You can turn this off in
+  settings.
 - Middle-click closes a tab or unloads a pin. **Clear** on the divider closes the space's unpinned tabs.
 - **Jump to a space by number:** "Go to space 1–9" commands exist but have no default keys
   (Chrome lets an extension suggest only 4). Bind them yourself at `chrome://extensions/shortcuts`,

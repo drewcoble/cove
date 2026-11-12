@@ -19,8 +19,8 @@ const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/redirect')) { res.writeHead(302, { Location: '/home' }); return res.end(); }
   res.writeHead(200, { 'content-type': 'text/html' });
-  // #far points at another site (localhost vs 127.0.0.1) for the Essential-link Peek tests.
-  res.end(`<title>Page ${req.url}</title><a id="l" href="/other">x</a> <a id="far" href="http://localhost:${server.address().port}/far">far</a>`);
+  // #far points at another site (localhost vs 127.0.0.1); #blank opens a new tab on the same site.
+  res.end(`<title>Page ${req.url}</title><a id="l" href="/other">x</a> <a id="far" href="http://localhost:${server.address().port}/far">far</a> <a id="blank" href="/opened" target="_blank">blank</a>`);
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
