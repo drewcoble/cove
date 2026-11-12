@@ -10,7 +10,7 @@
   let resources;
   const loadResources = () => resources ||= Promise.all([
     import(chrome.runtime.getURL('src/search-catalog.js')),
-    import(chrome.runtime.getURL('src/search.js')),
+    import(chrome.runtime.getURL('src/search-ranking.js')),
     import(chrome.runtime.getURL('src/shared.js')),
     fetch(chrome.runtime.getURL('src/command-overlay.css')).then(r => { if (!r.ok) throw new Error('Could not load search.'); return r.text(); }),
   ]);
@@ -67,26 +67,21 @@
   }
   function render(preserve = false) {
     if (!snapshot || !shadow || composing) return;
-    const [{ searchCatalog }, { searchScore, navigationUrl }, { COLORS }] = loaded;
+    const [{ searchCatalog }, { rankSearch, searchScore }, { COLORS }] = loaded;
     const oldKey = preserve ? choices[selected]?.key : null;
     const raw = input.value.trim();
     const commandsOnly = mode === 'all' && raw.startsWith('>');
     const query = commandsOnly ? raw.slice(1).trim() : raw;
-    const all = searchCatalog({ ...snapshot, excludeTabId: snapshot.tabId, mode, root: extensionRoot });
-    const matching = all.filter(item => !commandsOnly || ['action', 'space'].includes(item.kind))
-      .map(item => ({ item, score: searchScore(item.label, `${item.detail} ${item.searchDetail || ''}`, query) }))
-      .filter(entry => entry.score >= 0).sort((a, b) => b.score - a.score).map(entry => entry.item);
-    choices = matching.slice(0, 6);
-    if (mode === 'all' && query && !commandsOnly) {
-      const url = navigationUrl(query);
-      choices.push({ key: 'navigate', kind: 'navigate', text: query, label: url ? `Go to ${query}` : `Search for “${query}”`,
-        detail: 'Open in a new tab in this space', badge: url ? 'Visit' : 'Search web' });
-    }
+    const all = searchCatalog({ ...snapshot, excludeTabId: null, mode, root: extensionRoot });
+    choices = mode === 'archive'
+      ? all.map(item => ({ item, score: searchScore(item.label, item.searchDetail, query) }))
+        .filter(entry => entry.score >= 0).sort((a, b) => b.score - a.score).slice(0, 7).map(entry => entry.item)
+      : rankSearch({ items: all, history: snapshot.history, memory: snapshot.memory, query: raw, spaceId: snapshot.spaceId });
     selected = Math.max(0, choices.findIndex(item => item.key === oldKey));
     const space = snapshot.config.spaces.find(s => s.id === snapshot.spaceId);
     host.style.setProperty('--cove-space', COLORS[space?.color] || COLORS.purple);
     $('#space').textContent = space?.name || 'Your space';
-    $('#heading').textContent = mode === 'archive' ? 'Archived tabs' : commandsOnly ? 'Commands' : query ? 'Tabs, pins, and spaces' : 'Pick up where you left off';
+    $('#heading').textContent = mode === 'archive' ? 'Archived tabs' : commandsOnly ? 'Commands' : query ? 'Tabs, history, and search' : 'Pick up where you left off';
     $('#clear').hidden = !raw;
     $('#archive').setAttribute('aria-pressed', String(mode === 'archive'));
     list.replaceChildren();
@@ -135,7 +130,7 @@
     $('#error').hidden = true;
     dialog.setAttribute('aria-busy', 'true');
     try {
-      await send('commandAction', { kind: choice.kind === 'action' ? choice.id : choice.kind, id: choice.id, text: choice.text });
+      await send('commandAction', { kind: choice.kind === 'action' ? choice.id : choice.kind, id: choice.id, text: choice.text, query: input.value });
       close();
     } catch (reason) { error(reason); await refresh().catch(() => {}); }
     finally { busy = false; dialog?.removeAttribute('aria-busy'); }

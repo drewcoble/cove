@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+const moduleUrl = source => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
+const searchUrl = moduleUrl(fs.readFileSync(new URL('../src/search.js', import.meta.url), 'utf8'));
+const { rankSearch } = await import(moduleUrl(fs.readFileSync(new URL('../src/search-ranking.js', import.meta.url), 'utf8').replaceAll('./search.js', searchUrl)));
+const now = Date.now();
+const tab = { key: 'tab-1', kind: 'tab', label: 'GitHub', url: 'https://github.com/', spaceId: 'work', lastAccessed: now };
+const history = [{ id: 'h1', title: 'GitHub', url: 'https://github.com/', visitCount: 100, lastVisitTime: now },
+  { id: 'h2', title: 'Azure DevOps', url: 'https://dev.azure.com/team', visitCount: 200, lastVisitTime: now }];
+const rank = (query, extra = {}) => rankSearch({ items: [tab], history, query, spaceId: 'work', now, ...extra });
+assert.equal(rank('git')[0].key, 'tab-1');
+assert.equal(rank('github.com')[0].key, 'tab-1');
+assert.equal(rank('')[0].key, 'tab-1');
+assert.equal(rank('git', { items: [tab, { ...tab, key: 'tab-2' }] })[0].key, 'tab-1');
+assert.equal(rank('git').filter(item => item.url === tab.url).length, 1);
+assert.equal(rank('azure')[0].badge, 'History');
+assert.equal(rank('team')[0].badge, 'History');
+assert.equal(rank('how to configure git')[0].badge, 'Search web');
+const searches = [{ text: 'how to configure git', count: 3, lastUsed: now }];
+assert.equal(rank('how to configure git', { memory: { searches } })[0].badge, 'Recent search');
+assert.equal(rank('', { items: [], history: [], memory: { searches } })[0].text, searches[0].text);
+const other = { key: 'other', kind: 'pin', label: 'GitLab', url: 'https://gitlab.com/' };
+assert.equal(rank('git', { items: [tab, other], history: [], memory: { selections: [{ query: 'git', key: 'https://gitlab.com', count: 15 }] } })[0].key, 'other');
+assert.equal(rank('> archive', { items: [tab, { key: 'archive', kind: 'action', label: 'View archive' }] })[0].key, 'archive');
+assert.equal(rank('https://example.com')[0].text, 'https://example.com');
+assert.equal(rank('unknown words')[0].badge, 'Search web');
+console.log('PASS ranking: intent, exact URLs, tab deduplication, history frequency, recent searches, learned choices, and command mode');

@@ -12,6 +12,7 @@
 // restarts but not browser restarts; on a fresh browser session `reconcile()` rebuilds it
 // from the restored tab groups and tab URLs.
 
+import { destinationKey } from './search-ranking.js';
 import { isNewTabUrl, navigationUrl } from './search.js';
 import { COLORS, newId, sameUrl, isDrifted, isWebUrl, redactUrl } from './shared.js';
 
@@ -1010,7 +1011,12 @@ Object.assign(handlers, {
   },
   async commandContext({ token }, sender) {
     const tab = await overlaySource(token, sender);
-    return { config, rt: { tabPin: rt.tabPin, tabSpace: rt.tabSpace, groupSpace: rt.groupSpace, mru: rt.mru },
+    const [history, stored] = await Promise.all([
+      chrome.history.search({ text: '', startTime: Date.now() - 90 * 86400000, maxResults: 2000 }).catch(() => []),
+      chrome.storage.local.get('searchMemory'),
+    ]);
+    return { history: history.filter(entry => /^https?:\/\//i.test(entry.url)).map(entry => ({ ...entry, url: redactUrl(entry.url) })).filter(entry => entry.url),
+      memory: stored.searchMemory || {}, config, rt: { tabPin: rt.tabPin, tabSpace: rt.tabSpace, groupSpace: rt.groupSpace, mru: rt.mru },
       tabs: await chrome.tabs.query({ windowId: tab.windowId }), windowId: tab.windowId, tabId: tab.id,
       spaceId: tabSpaceOf(tab) || windowSpace(tab.windowId) };
   },
@@ -1019,19 +1025,22 @@ Object.assign(handlers, {
     delete rt.commandSessions[sender.tab.id];
     touchRt();
   },
-  async commandAction({ token, kind, id, text }, sender) {
+  async commandAction({ token, kind, id, text, query }, sender) {
     const tab = await overlaySource(token, sender);
     const windowId = tab.windowId;
     const spaceId = tabSpaceOf(tab) || windowSpace(windowId);
+    let chosenUrl;
     if (kind === 'navigate') {
       const query = text?.trim();
       if (!query) return;
       const url = navigationUrl(query) || undefined;
+      chosenUrl = url;
       const target = await handlers.newTab({ windowId, spaceId, url });
       if (!url) await chrome.search.query({ text: query, tabId: target });
     } else if (kind === 'tab') {
       const target = await getTab(id);
       if (!target || target.windowId !== windowId) throw new Error('That tab has closed. Search again.');
+      chosenUrl = target.pendingUrl || target.url;
       const targetSpace = tabSpaceOf(target);
       if (targetSpace) setWindowSpace(windowId, targetSpace);
       await safe(() => chrome.tabs.update(target.id, { active: true }));
@@ -1039,6 +1048,7 @@ Object.assign(handlers, {
     } else if (kind === 'pin') {
       const pin = config.pins[id];
       if (!pin) throw new Error('That pin has been removed.');
+      chosenUrl = pin.url;
       await handlers.openPin({ windowId, pinId: id, reset: false });
       if (pin.spaceId != null) setWindowSpace(windowId, pin.spaceId);
       await applyCollapse(windowId);
@@ -1055,6 +1065,26 @@ Object.assign(handlers, {
       if (!text?.trim()) throw new Error('Enter a folder name.');
       return handlers.createFolder({ spaceId, name: text });
     } else throw new Error('Unknown search action.');
+    if (['navigate', 'tab', 'pin'].includes(kind)) {
+      const { searchMemory = {} } = await chrome.storage.local.get('searchMemory');
+      const now = Date.now();
+      const typed = typeof query === 'string' ? query.trim().toLocaleLowerCase().slice(0, 500) : '';
+      const searches = searchMemory.searches || [];
+      if (kind === 'navigate' && !navigationUrl(text || '')) {
+        const phrase = text.trim().slice(0, 500);
+        const previous = searches.find(entry => entry.text.toLocaleLowerCase() === phrase.toLocaleLowerCase());
+        searchMemory.searches = [{ text: phrase, count: (previous?.count || 0) + 1, lastUsed: now },
+          ...searches.filter(entry => entry !== previous)].slice(0, 50);
+      }
+      if (typed) {
+        const key = chosenUrl ? destinationKey(redactUrl(chosenUrl) || chosenUrl) : `search-${text.trim().toLocaleLowerCase()}`;
+        const selections = searchMemory.selections || [];
+        const previous = selections.find(entry => entry.query === typed && entry.key === key);
+        searchMemory.selections = [{ query: typed, key, count: (previous?.count || 0) + 1, lastUsed: now },
+          ...selections.filter(entry => entry !== previous)].slice(0, 100);
+      }
+      await chrome.storage.local.set({ searchMemory });
+    }
     return true;
   },
 });
@@ -1087,7 +1117,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const fromExtensionPage = sender.url?.startsWith(chrome.runtime.getURL(''));
   if (!fromExtensionPage && !CONTENT_SCRIPT_HANDLERS.has(msg.type)) return;
   const args = fromExtensionPage ? msg :
-    msg.type === 'commandAction' ? { token: msg.token, kind: msg.kind, id: msg.id, text: msg.text } :
+    msg.type === 'commandAction' ? { token: msg.token, kind: msg.kind, id: msg.id, text: msg.text, query: msg.query } :
     ['commandContext', 'closeCommandOverlay'].includes(msg.type) ? { token: msg.token } :
     { type: msg.type, url: msg.url };
   enqueue(() => handler(args, sender)).then(

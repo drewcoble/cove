@@ -14,7 +14,8 @@
     "offscreen",
     "clipboardWrite",
     "scripting",
-    "contextMenus"
+    "contextMenus",
+    "history"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -124,7 +125,8 @@
         "src/search-catalog.js",
         "src/search.js",
         "src/shared.js",
-        "src/command-overlay.css"
+        "src/command-overlay.css",
+        "src/search-ranking.js"
       ],
       "matches": [
         "<all_urls>"

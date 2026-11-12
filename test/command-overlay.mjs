@@ -117,6 +117,26 @@ export async function run({ cdp, sessionId: control, base }) {
     await wait(() => api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.some(t => /67291/.test(t.pendingUrl || t.url)))`));
     await closed(source);
     ok((await tab(sourceId)).url.endsWith('/overlay-source'), 'web search opens separately without navigating the source');
+    const savedSearches = await api("chrome.storage.local.get('searchMemory').then(r => r.searchMemory.searches)");
+    ok(savedSearches.some(entry => entry.text === 'floating search query 67291'), 'submitted searches are saved locally');
+    await api(`chrome.history.addUrl({ url: ${JSON.stringify(base + '/frequent-destination')} })`);
+    await api(`chrome.tabs.update(${sourceId}, { active: true })`);
+    await open(sourceId, source);
+    await search(source, 'frequent-destination');
+    ok(await panel(source, "return root.querySelector('[role=option] .result-kind').textContent === 'History'"), 'closed history destinations appear in floating search');
+    await key(source, 'Enter');
+    await wait(() => api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.some(t => (t.pendingUrl || t.url) === ${JSON.stringify(base + '/frequent-destination')}))`));
+    await closed(source);
+    const historyTab = await api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.find(t => (t.pendingUrl || t.url) === ${JSON.stringify(base + '/frequent-destination')}))`);
+    ok((await runtime()).tabSpace[historyTab.id] === main, 'history destinations open in the current space');
+    const learned = await api("chrome.storage.local.get('searchMemory').then(r => r.searchMemory.selections)");
+    ok(learned.some(entry => entry.query === 'frequent-destination'), 'chosen destinations are learned locally for the typed query');
+    await api(`chrome.tabs.update(${sourceId}, { active: true })`);
+    await open(sourceId, source);
+    await search(source, 'floating search query 67291');
+    ok(await panel(source, "return root.querySelector('[role=option] .result-kind').textContent === 'Recent search'"), 'recent searches outrank loose page matches');
+    await key(source, 'Escape'); await key(source, 'Escape'); await closed(source);
+
 
     await api(`chrome.tabs.update(${sourceId}, { active: true })`);
     await open(sourceId, source);

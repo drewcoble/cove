@@ -35,14 +35,14 @@ export function searchCatalog({ config, rt, tabs, windowId, excludeTabId, spaceI
       label: pin ? pinTitle(pin, tab) : tab.title || hostname(url) || 'Untitled tab',
       detail: [hostname(url), spaceName(id), pin && folderPath(pin)].filter(Boolean).join(' · '),
       searchDetail: `${url} ${spaceName(id)} ${pin ? folderPath(pin) : ''}`,
-      badge: 'Switch to tab', url,
+      badge: 'Switch to tab', url, spaceId: id, lastAccessed: tab.lastAccessed, mruRank: rank(tab),
     });
   }
   for (const pin of Object.values(config.pins)) {
     if (tabs.some(tab => rt.tabPin?.[tab.id] === pin.id)) continue;
     items.push({ key: `pin-${pin.id}`, kind: 'pin', id: pin.id, label: pinTitle(pin),
       detail: [hostname(pin.url), spaceName(pin.spaceId), folderPath(pin)].filter(Boolean).join(' · '),
-      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${folderPath(pin)}`, badge: 'Pinned', url: pin.url,
+      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${folderPath(pin)}`, badge: 'Pinned', url: pin.url, spaceId: pin.spaceId,
     });
   }
   for (const space of config.spaces) items.push({ key: `space-${space.id}`, kind: 'space', id: space.id,
