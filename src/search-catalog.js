@@ -2,7 +2,7 @@ import { hostname, pinTitle } from './shared.js';
 import { isNewTabUrl } from './search.js';
 
 // Pure catalog shared by New Tab and the in-page command overlay.
-export function searchCatalog({ config, rt, tabs, windowId, excludeTabId, spaceId, mode, root }) {
+export function searchCatalog({ config, rt, tabs, windowId, excludeTabId, spaceId, mode, root, spacePinsOnly = false }) {
   const spaceName = id => config.spaces.find(space => space.id === id)?.name || (id == null ? 'Essentials' : 'Previous space');
   const folderPath = pin => {
     const names = [];
@@ -27,7 +27,7 @@ export function searchCatalog({ config, rt, tabs, windowId, excludeTabId, spaceI
     const url = tab.pendingUrl || tab.url || '';
     return tab.id !== excludeTabId && !isNewTabUrl(url, root) && !url.startsWith(root);
   }).sort((a, b) => rank(a) - rank(b) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
-  for (const tab of live) {
+  for (const tab of spacePinsOnly ? [] : live) {
     const pin = config.pins[rt.tabPin?.[tab.id]];
     const id = tab.pinned ? null : rt.groupSpace?.[tab.groupId] || rt.tabSpace?.[tab.id];
     const url = tab.pendingUrl || tab.url || '';
@@ -39,10 +39,10 @@ export function searchCatalog({ config, rt, tabs, windowId, excludeTabId, spaceI
     });
   }
   for (const pin of Object.values(config.pins)) {
-    if (tabs.some(tab => rt.tabPin?.[tab.id] === pin.id)) continue;
+    if (spacePinsOnly ? pin.spaceId != null && pin.spaceId !== spaceId : tabs.some(tab => rt.tabPin?.[tab.id] === pin.id)) continue;
     items.push({ key: `pin-${pin.id}`, kind: 'pin', id: pin.id, label: pinTitle(pin),
       detail: [hostname(pin.url), spaceName(pin.spaceId), folderPath(pin)].filter(Boolean).join(' · '),
-      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${folderPath(pin)}`, badge: 'Pinned', url: pin.url, spaceId: pin.spaceId,
+      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${folderPath(pin)}`, badge: spacePinsOnly ? 'Switch to tab' : 'Pinned', url: pin.url, spaceId: pin.spaceId,
     });
   }
   for (const space of config.spaces) items.push({ key: `space-${space.id}`, kind: 'space', id: space.id,

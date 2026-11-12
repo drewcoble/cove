@@ -1030,10 +1030,10 @@ Object.assign(handlers, {
     const windowId = tab.windowId;
     const spaceId = tabSpaceOf(tab) || windowSpace(windowId);
     let chosenUrl;
-    if (kind === 'navigate') {
+    if (kind === 'navigate' || kind === 'search') {
       const query = text?.trim();
       if (!query) return;
-      const url = navigationUrl(query) || undefined;
+      const url = kind === 'search' ? undefined : navigationUrl(query) || undefined;
       chosenUrl = url;
       const target = await handlers.newTab({ windowId, spaceId, url });
       if (!url) await chrome.search.query({ text: query, tabId: target });
@@ -1065,12 +1065,12 @@ Object.assign(handlers, {
       if (!text?.trim()) throw new Error('Enter a folder name.');
       return handlers.createFolder({ spaceId, name: text });
     } else throw new Error('Unknown search action.');
-    if (['navigate', 'tab', 'pin'].includes(kind)) {
+    if (['navigate', 'search', 'tab', 'pin'].includes(kind)) {
       const { searchMemory = {} } = await chrome.storage.local.get('searchMemory');
       const now = Date.now();
       const typed = typeof query === 'string' ? query.trim().toLocaleLowerCase().slice(0, 500) : '';
       const searches = searchMemory.searches || [];
-      if (kind === 'navigate' && !navigationUrl(text || '')) {
+      if (kind === 'search' || (kind === 'navigate' && !navigationUrl(text || ''))) {
         const phrase = text.trim().slice(0, 500);
         const previous = searches.find(entry => entry.text.toLocaleLowerCase() === phrase.toLocaleLowerCase());
         searchMemory.searches = [{ text: phrase, count: (previous?.count || 0) + 1, lastUsed: now },

@@ -126,7 +126,8 @@
         "src/search.js",
         "src/shared.js",
         "src/command-overlay.css",
-        "src/search-ranking.js"
+        "src/search-ranking.js",
+        "_favicon/*"
       ],
       "matches": [
         "<all_urls>"

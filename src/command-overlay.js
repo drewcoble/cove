@@ -65,6 +65,31 @@
       if (scroll) list.children[selected]?.scrollIntoView({ block: 'nearest' });
     } else input.removeAttribute('aria-activedescendant');
   }
+  function resultIcon(choice) {
+    const icon = document.createElement('span');
+    icon.className = 'result-icon'; icon.setAttribute('aria-hidden', 'true');
+    const svg = path => {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      node.setAttribute('viewBox', '0 0 24 24'); node.setAttribute('fill', 'none');
+      node.setAttribute('stroke', 'currentColor'); node.setAttribute('stroke-width', '1.6');
+      node.setAttribute('stroke-linecap', 'round'); node.setAttribute('stroke-linejoin', 'round');
+      const shape = document.createElementNS(node.namespaceURI, 'path'); shape.setAttribute('d', path);
+      node.append(shape); return node;
+    };
+    if (choice.kind === 'search') {
+      icon.classList.add('search-result-icon');
+      icon.append(svg('M21 21l-5-5 M18 10.5a7.5 7.5 0 1 1-15 0a7.5 7.5 0 0 1 15 0'));
+    } else if (/^https?:\/\//i.test(choice.url || '')) {
+      icon.classList.add('site-result-icon');
+      const fallback = () => icon.replaceChildren(svg('M21 12a9 9 0 1 1-18 0a9 9 0 0 1 18 0 M3 12h18 M12 3c-5 5-5 13 0 18 M12 3c5 5 5 13 0 18'));
+      const img = document.createElement('img'); img.alt = ''; img.width = img.height = 20;
+      img.referrerPolicy = 'no-referrer'; img.onerror = fallback;
+      // Use the browser favicon cache; never contact a third-party icon service.
+      img.src = `${extensionRoot}_favicon/?pageUrl=${encodeURIComponent(choice.url)}&size=32`;
+      icon.append(img);
+    } else icon.textContent = choice.kind === 'space' ? '◫' : choice.kind === 'archive' ? '↶' : choice.kind === 'navigate' ? '↗' : choice.kind === 'action' ? '⌘' : (choice.label[0] || '·').toLocaleUpperCase();
+    return icon;
+  }
   function render(preserve = false) {
     if (!snapshot || !shadow || composing) return;
     const [{ searchCatalog }, { rankSearch, searchScore }, { COLORS }] = loaded;
@@ -72,16 +97,16 @@
     const raw = input.value.trim();
     const commandsOnly = mode === 'all' && raw.startsWith('>');
     const query = commandsOnly ? raw.slice(1).trim() : raw;
-    const all = searchCatalog({ ...snapshot, excludeTabId: null, mode, root: extensionRoot });
+    const all = searchCatalog({ ...snapshot, excludeTabId: null, mode, root: extensionRoot, spacePinsOnly: true });
     choices = mode === 'archive'
       ? all.map(item => ({ item, score: searchScore(item.label, item.searchDetail, query) }))
-        .filter(entry => entry.score >= 0).sort((a, b) => b.score - a.score).slice(0, 7).map(entry => entry.item)
+        .filter(entry => entry.score >= 0).sort((a, b) => b.score - a.score).slice(0, 50).map(entry => entry.item)
       : rankSearch({ items: all, history: snapshot.history, memory: snapshot.memory, query: raw, spaceId: snapshot.spaceId });
     selected = Math.max(0, choices.findIndex(item => item.key === oldKey));
     const space = snapshot.config.spaces.find(s => s.id === snapshot.spaceId);
     host.style.setProperty('--cove-space', COLORS[space?.color] || COLORS.purple);
     $('#space').textContent = space?.name || 'Your space';
-    $('#heading').textContent = mode === 'archive' ? 'Archived tabs' : commandsOnly ? 'Commands' : query ? 'Tabs, history, and search' : 'Pick up where you left off';
+    $('#heading').textContent = mode === 'archive' ? 'Archived tabs' : commandsOnly ? 'Commands' : query ? 'Pins, history, and search' : 'Pick up where you left off';
     $('#clear').hidden = !raw;
     $('#archive').setAttribute('aria-pressed', String(mode === 'archive'));
     list.replaceChildren();
@@ -89,13 +114,13 @@
       const button = document.createElement('button');
       button.type = 'button'; button.className = 'result'; button.id = `zen-command-option-${index}`; button.tabIndex = -1;
       button.setAttribute('role', 'option'); button.dataset.key = choice.key; button.title = `${choice.label}\n${choice.searchDetail || choice.detail}`;
-      const icon = document.createElement('span'); icon.className = 'result-icon'; icon.setAttribute('aria-hidden', 'true');
-      icon.textContent = choice.kind === 'space' ? '◫' : choice.kind === 'archive' ? '↶' : choice.kind === 'navigate' ? '↗' : choice.kind === 'action' ? '⌘' : (choice.label[0] || '·').toLocaleUpperCase();
+      const icon = resultIcon(choice);
       const text = document.createElement('span'); text.className = 'result-text';
       const title = document.createElement('span'); title.className = 'result-title'; title.textContent = choice.label;
       const detail = document.createElement('span'); detail.className = 'result-detail'; detail.textContent = choice.detail;
       text.append(title, detail);
       const badge = document.createElement('span'); badge.className = 'result-kind'; badge.textContent = choice.badge;
+      if (choice.kind === 'pin') badge.classList.add('switch-to-tab');
       const enter = document.createElement('span'); enter.className = 'enter'; enter.textContent = '↵'; enter.setAttribute('aria-hidden', 'true');
       button.append(icon, text, badge, enter);
       button.onpointermove = () => { if (selected !== index) { selected = index; selection(); } };
@@ -109,7 +134,8 @@
       list.append(empty);
     }
     $('#status').textContent = `${choices.length} results available.`;
-    selection();
+    if (!preserve) list.scrollTop = 0;
+    selection(preserve);
   }
   function changeMode(next) {
     mode = next; input.value = ''; input.placeholder = mode === 'archive' ? 'Search your archive…' : 'Search or enter URL…';
@@ -166,7 +192,7 @@
       shadow = host.attachShadow({ mode: 'closed' });
       const sheet = new CSSStyleSheet(); sheet.replaceSync(loaded[3]); shadow.adoptedStyleSheets = [sheet];
       shadow.innerHTML = `<dialog aria-label="Cove command bar"><section class="surface">
-        <div id="search-view"><form id="search-form" autocomplete="off"><span class="search-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></span><input id="search" placeholder="Search or enter URL…" autocomplete="off" spellcheck="false" role="combobox" aria-label="Search tabs, pins, spaces, or the web" aria-controls="results" aria-expanded="true" aria-autocomplete="list"><button id="clear" type="button" aria-label="Clear search" hidden>✕</button></form>
+        <div id="search-view"><form id="search-form" autocomplete="off"><span class="search-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></span><input id="search" placeholder="Search or enter URL…" autocomplete="off" spellcheck="false" role="combobox" aria-label="Search pins, history, or the web" aria-controls="results" aria-expanded="true" aria-autocomplete="list"><button id="clear" type="button" aria-label="Clear search" hidden>✕</button></form>
         <div class="heading"><span id="heading">Getting your spaces ready…</span><span id="space"></span></div><div id="results" role="listbox" aria-label="Search results"></div>
         <footer><span class="hints"><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> open <kbd>esc</kbd> back</span><button id="archive" type="button" aria-pressed="false">Archive ↶</button></footer></div>
         <form id="folder-view" hidden><h2>New folder</h2><label for="folder-name">Name</label><input id="folder-name" required maxlength="120" autocomplete="off" placeholder="A place for your tabs"><div class="actions"><button id="folder-cancel" type="button">Cancel</button><button id="folder-save" type="submit">Create folder</button></div></form>
