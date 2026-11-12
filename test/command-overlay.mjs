@@ -131,7 +131,8 @@ export async function run({ cdp, sessionId: control, base }) {
     await wait(() => api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.some(t => (t.pendingUrl || t.url) === ${JSON.stringify(base + '/frequent-destination')}))`));
     await closed(source);
     const historyTab = await api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.find(t => (t.pendingUrl || t.url) === ${JSON.stringify(base + '/frequent-destination')}))`);
-    ok((await runtime()).tabSpace[historyTab.id] === main, 'history destinations open in the current space');
+    await wait(async () => (await runtime()).tabSpace[historyTab.id] === main);
+    ok(true, 'history destinations open in the current space');
     const learned = await api("chrome.storage.local.get('searchMemory').then(r => r.searchMemory.selections)");
     ok(learned.some(entry => entry.query === 'frequent-destination'), 'chosen destinations are learned locally for the typed query');
     await api(`chrome.tabs.update(${sourceId}, { active: true })`);
@@ -200,6 +201,7 @@ export async function run({ cdp, sessionId: control, base }) {
     await wait(async () => (await runtime()).activeSpace[W] === research);
     await closed(source);
     ok(!!(await tab(sourceId)), 'unloaded pins open in their space without closing the source');
+    await wait(async () => { const c = await config(); return !c.folders[parentFolder].collapsed && !c.folders[nestedFolder].collapsed; });
     const pinConfig = await config();
     ok(!pinConfig.folders[parentFolder].collapsed && !pinConfig.folders[nestedFolder].collapsed && pinConfig.pins[pinId].folderId === nestedFolder, 'selecting a nested pin reveals its collapsed ancestors and keeps folder membership');
     const livePinId = +(Object.entries((await runtime()).tabPin).find(([, id]) => id === pinId)[0]);

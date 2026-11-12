@@ -1007,10 +1007,14 @@ Object.assign(handlers, {
 // Its token is kept in extension session storage and in the isolated world, never in page DOM.
 async function openCommandOverlay(tab) {
   if ((tab.pendingUrl || tab.url || '').split(/[?#]/)[0] === chrome.runtime.getURL('src/newtab.html')) {
+    await chrome.tabs.update(tab.id, { active: true });
     chrome.runtime.sendMessage({ target: 'newtab', type: 'focusSearch', tabId: tab.id }).catch(() => {});
     return { newTab: true };
   }
   try {
+    // Sidebar clicks can leave keyboard focus outside the page. Activate the target
+    // before opening/refocusing its panel; the isolated UI then focuses its window.
+    await chrome.tabs.update(tab.id, { active: true });
     const [{ documentId }] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ['src/command-overlay.js'] });
     const [{ result: opened }] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: () => {
       if (!globalThis.__coveCommandOverlay?.isOpen()) return false;

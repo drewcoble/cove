@@ -36,6 +36,13 @@ async function send(type, payload = {}) {
   if (!response?.ok) throw new Error(response?.error || 'That action could not be completed. Please try again.');
   return response.result;
 }
+function focusSearch() {
+  if (document.hidden) return;
+  window.focus(); input.focus(); input.select();
+  requestAnimationFrame(() => {
+    if (!document.hidden && document.activeElement !== input) { window.focus(); input.focus(); }
+  });
+}
 function showError(error) {
   $('#error').textContent = error?.message || String(error);
   $('#error').hidden = false;
@@ -226,10 +233,10 @@ try {
   await refresh();
   // Chrome may keep focus in the omnibox on a native New Tab. Request page focus
   // once on load; never steal it back while someone is using browser controls.
-  if (tab.active) input.focus();
+  if (tab.active) focusSearch();
 } catch (error) { showError(error); }
 
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (sender.url !== chrome.runtime.getURL('src/background.js')) return;
-  if (message.target === 'newtab' && message.type === 'focusSearch' && message.tabId === context?.tabId) { input.focus(); input.select(); }
+  if (message.target === 'newtab' && message.type === 'focusSearch' && message.tabId === context?.tabId) { focusSearch(); }
 });

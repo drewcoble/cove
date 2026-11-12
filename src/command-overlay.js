@@ -6,7 +6,7 @@
   let token = null;
   let host, shadow, dialog, input, list, previousFocus;
   let snapshot, choices = [], selected = 0, mode = 'all', busy = false, composing = false, folder = false;
-  let opening = false, version = 0, refreshTimer;
+  let opening = false, version = 0, refreshTimer, focusFrame;
   let resources;
   const loadResources = () => resources ||= Promise.all([
     import(chrome.runtime.getURL('src/search-catalog.js')),
@@ -20,24 +20,36 @@
     return response.result;
   };
   const $ = selector => shadow.querySelector(selector);
-  function focus() {
-    if (!dialog?.open) return;
-    (folder ? $('#folder-name') : input).focus({ preventScroll: true });
-    if (!folder) input.select();
+  function focus({ select = true } = {}) {
+    if (!dialog?.open || document.hidden) return;
+    const focusToken = token;
+    const apply = (select = false) => {
+      if (token !== focusToken || !dialog?.open || document.hidden) return;
+      const target = folder ? $('#folder-name') : input;
+      const needsFocus = shadow.activeElement !== target || !document.hasFocus();
+      window.focus();
+      target.focus({ preventScroll: true });
+      if (!folder && (select || needsFocus)) input.select();
+    };
+    apply(select);
+    // Chrome can finish transferring focus from the sidebar after the script runs.
+    cancelAnimationFrame(focusFrame);
+    focusFrame = requestAnimationFrame(() => apply());
   }
-  function close() {
+  function close({ restoreFocus = true } = {}) {
     if (!token) return;
     const closingToken = token;
     token = null;
     version++;
     opening = false;
     clearTimeout(refreshTimer);
+    cancelAnimationFrame(focusFrame);
     dialog?.close();
     host?.remove();
     host = shadow = dialog = input = list = null;
     snapshot = null;
-    if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
-    chrome.runtime.sendMessage({ type: 'closeCommandOverlay', token: closingToken }).catch(() => {});
+    if (restoreFocus && !document.hidden && previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    if (chrome.runtime?.id) chrome.runtime.sendMessage({ type: 'closeCommandOverlay', token: closingToken }).catch(() => {});
   }
   function error(reason) {
     if (!shadow) return;
@@ -152,14 +164,15 @@
     if (busy || !choice) return;
     if (choice.kind === 'action' && choice.id === 'archive') return changeMode('archive');
     if (choice.kind === 'action' && choice.id === 'folder') return showFolder(true);
+    const actionToken = token;
     busy = true;
     $('#error').hidden = true;
     dialog.setAttribute('aria-busy', 'true');
     try {
       await send('commandAction', { kind: choice.kind === 'action' ? choice.id : choice.kind, id: choice.id, text: choice.text, query: input.value });
-      close();
-    } catch (reason) { error(reason); await refresh().catch(() => {}); }
-    finally { busy = false; dialog?.removeAttribute('aria-busy'); }
+      if (token === actionToken) close();
+    } catch (reason) { if (token === actionToken) { error(reason); await refresh().catch(() => {}); } }
+    finally { if (!token || token === actionToken) { busy = false; dialog?.removeAttribute('aria-busy'); } }
   }
   function handleKey(event) {
     if (event.isComposing || composing || busy) return;
@@ -206,34 +219,41 @@
         event.preventDefault();
         const name = $('#folder-name').value.trim();
         if (!name || busy) return;
+        const actionToken = token;
         busy = true; $('#folder-save').disabled = true;
         try {
           await send('commandAction', { kind: 'folder', text: name });
+          if (token !== actionToken) return;
           await refresh();
+          if (token !== actionToken) return;
           showFolder(false); input.value = ''; render();
           $('#status').textContent = `Created folder ${name}.`;
-        } catch (reason) { error(reason); }
-        finally { busy = false; if (shadow) $('#folder-save').disabled = false; }
+        } catch (reason) { if (token === actionToken) error(reason); }
+        finally { if (!token || token === actionToken) { busy = false; if (shadow) $('#folder-save').disabled = false; } }
       };
       dialog.oncancel = event => { event.preventDefault(); close(); };
       dialog.onpointerdown = event => { if (event.target === dialog) close(); };
       (document.documentElement || document).append(host);
       dialog.showModal();
-      input.focus();
+      focus();
       await refresh();
-      if (token === openToken) input.focus();
+      if (token === openToken) focus({ select: false });
     } catch (reason) {
       if (token === openToken) { if (shadow) error(reason); else close(); }
     } finally { if (token === openToken) opening = false; }
   }
   globalThis.__coveCommandOverlay = { open, focus, isOpen: () => opening || !!dialog?.open };
   window.addEventListener('keydown', event => {
+    if (!chrome.runtime?.id) { if (token) close({ restoreFocus: false }); return; }
     const shortcut = event.key.toLowerCase() === 'k' && (mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey) && !event.altKey && !event.shiftKey;
     if (shortcut && event.isTrusted && !event.isComposing) {
       event.preventDefault(); event.stopImmediatePropagation();
       if (dialog?.open) focus();
       else if (!event.repeat) chrome.runtime.sendMessage({ type: 'openCommandOverlay' }).catch(() => {});
       return;
+    }
+    if (dialog?.open && event.isTrusted && event.key === 'Escape' && !event.composedPath().includes(host)) {
+      handleKey(event); event.stopImmediatePropagation(); return;
     }
     if (host && event.composedPath().includes(host)) {
       if (event.isTrusted) handleKey(event);
@@ -250,6 +270,10 @@
       event.stopImmediatePropagation();
     }, true);
   }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && token) close({ restoreFocus: false });
+  });
+  window.addEventListener('focus', () => { if (dialog?.open) focus({ select: false }); });
   chrome.runtime.onMessage.addListener((message, sender) => {
     if (sender.id === chrome.runtime.id && !sender.tab && message?.type === 'commandRefresh') schedule();
   });
