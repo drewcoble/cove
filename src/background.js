@@ -87,8 +87,8 @@ function normalizeConfig(c) {
   }
   for (const pin of Object.values(cfg.pins)) {
     pin.url = redactUrl(pin.url, { keepHash: true }) || pin.url;
-    pin.lastUrl = pin.lastUrl && redactUrl(pin.lastUrl);
-    pin.aliases = [...new Set((pin.aliases ?? []).map(redactUrl).filter(Boolean))];
+    pin.lastUrl = pin.lastUrl && redactUrl(pin.lastUrl, { keepHash: true });
+    pin.aliases = [...new Set((pin.aliases ?? []).map(url => redactUrl(url, { keepHash: true })).filter(Boolean))];
   }
   cfg.archive = cfg.archive.map(entry => ({ ...entry, url: redactUrl(entry.url, { keepHash: true }) })).filter(entry => entry.url);
   cfg.version = 2;
@@ -301,7 +301,7 @@ function createPin(tab, spaceId, index) {
     favIconUrl: goodFavicon(tab.favIconUrl),
     aliases: [],
     spaceId,
-    lastUrl: redactUrl(url),
+    lastUrl: redactUrl(url, { keepHash: true }),
   };
   insertAt(pinList(spaceId), id, index);
   touchConfig();
@@ -365,7 +365,9 @@ async function placePinTab(tab, spaceId) {
 }
 
 function addAlias(pin, url) {
-  url = redactUrl(url);
+  url = redactUrl(url, { keepHash: true });
+  // Same-page fragment changes are navigation, not redirect aliases, even during settling.
+  if ([pin.url, ...(pin.aliases || [])].some(home => sameUrl(home, url))) return;
   if (!isWebUrl(url) || !isDrifted(pin, url)) return;
   pin.aliases = [url, ...(pin.aliases ?? [])].slice(0, MAX_ALIASES);
   touchConfig();
@@ -1239,8 +1241,8 @@ async function onTabUpdated(tabId, ci) {
 
   if (!pin) return;
   const url = tab.url || tab.pendingUrl;
-  if ('url' in ci && url && pin.lastUrl !== redactUrl(url)) {
-    pin.lastUrl = redactUrl(url);
+  if ('url' in ci && url && pin.lastUrl !== redactUrl(url, { keepHash: true })) {
+    pin.lastUrl = redactUrl(url, { keepHash: true });
     touchConfig();
   }
   const s = settling.get(tabId);

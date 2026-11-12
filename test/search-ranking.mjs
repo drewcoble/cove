@@ -56,3 +56,15 @@ assert.ok(!JSON.stringify(migrated).includes('dummy-'));
 assert.ok(!JSON.stringify(migrated).includes('password'));
 assert.ok(searchMemoryText('https://app.example/#/reports').endsWith('#/reports'));
 console.log('PASS regressions: distinct folder pins, duplicate URLs, history-title aliases, and sanitizing new/existing search memory');
+
+const { isDrifted } = await import(sharedUrl);
+assert.equal(isDrifted({ url: 'https://app.example/#/dashboard', aliases: [] }, 'https://app.example/#/reports'), true);
+assert.equal(isDrifted({ url: 'https://login.example/', aliases: ['https://app.example/#/dashboard'] }, 'https://app.example/#/dashboard'), false);
+assert.equal(isDrifted({ url: 'https://login.example/', aliases: ['https://app.example/#/dashboard'] }, 'https://app.example/#/reports'), true);
+for (const text of ['localhost', 'localhost:3000', 'example.com', 'Example.COM', 'https://Example.COM', 'git reset --soft HEAD~1']) {
+  assert.equal(searchMemoryText(text), text);
+  assert.equal(normalizeSearchMemory({ searches: [{ text }] }).searches[0].text, text);
+}
+assert.equal(searchMemoryText('example.com/callback?code=secret&view=inbox'), 'example.com/callback?view=inbox');
+assert.equal(searchMemoryText('localhost:3000/callback?token=secret'), 'localhost:3000/callback');
+console.log('PASS hash-route drift and redirect aliases; exact recent query text with URL-token redaction');

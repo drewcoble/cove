@@ -80,7 +80,7 @@ export async function run({ cdp, sessionId: control, extId, base }) {
     await evaluate(session, "var input = document.querySelector('#search'); input.value='example.com'; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelectorAll('[role=option]')[1].click();");
     await wait(async()=> /[?&]q=example/.test((await tab(fallbackId))?.pendingUrl || (await tab(fallbackId))?.url || ''));
     ok(true, 'second-row search treats a domain as a search query');
-    await wait(() => api("chrome.storage.local.get('searchMemory').then(r => r.searchMemory?.searches?.some(e => e.text === 'https://example.com/'))"));
+    await wait(() => api("chrome.storage.local.get('searchMemory').then(r => r.searchMemory?.searches?.some(e => e.text === 'example.com'))"));
     ok(true, 'fallback submissions are saved to the shared local recent searches');
     await api(`chrome.tabs.update(${pins[0].id},{active:true})`);
     const againNative = await api(`chrome.tabs.create({windowId:${W},url:'chrome://newtab/',active:true})`);

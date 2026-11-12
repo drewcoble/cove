@@ -11,10 +11,16 @@ export function searchMemoryText(value) {
   const text = typeof value === 'string' ? value.trim() : '';
   const url = navigationUrl(text);
   if (!url) return text.slice(0, 500);
-  const clean = redactUrl(url, { keepHash: true });
-  if (!clean) return '';
-  const parsed = new URL(clean); parsed.username = ''; parsed.password = '';
-  return parsed.href.slice(0, 500);
+  try {
+    const original = new URL(url).href;
+    const clean = redactUrl(url, { keepHash: true });
+    if (!clean) return '';
+    const parsed = new URL(clean); parsed.username = ''; parsed.password = '';
+    // Preserve the submitted spelling and URL-vs-search intent unless redaction is needed.
+    if (parsed.href === original) return text.slice(0, 500);
+    const explicitScheme = /^(https?:\/\/|file:\/\/|chrome:\/\/|about:)/i.test(text);
+    return (explicitScheme ? parsed.href : parsed.href.replace(/^https?:\/\//, '')).slice(0, 500);
+  } catch { return ''; }
 }
 
 export function normalizeSearchMemory(memory = {}) {
