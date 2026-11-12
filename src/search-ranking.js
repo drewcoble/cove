@@ -1,10 +1,36 @@
 import { navigationUrl, searchScore } from './search.js';
+import { redactUrl } from './shared.js';
 export { searchScore } from './search.js';
 
 const normalized = value => (value || '').trim().toLocaleLowerCase();
 export function destinationKey(url) {
-  try { const u = new URL(url); u.hash = ''; return u.href.replace(/\/$/, ''); } catch { return url; }
+  try { const u = new URL(url); return /^https?:$/.test(u.protocol) && u.pathname === '/' && !u.search && !u.hash ? u.origin : u.href; } catch { return url; }
 }
+// Sanitize URL-shaped input before it becomes local ranking/search memory.
+export function searchMemoryText(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const url = navigationUrl(text);
+  if (!url) return text.slice(0, 500);
+  const clean = redactUrl(url, { keepHash: true });
+  if (!clean) return '';
+  const parsed = new URL(clean); parsed.username = ''; parsed.password = '';
+  return parsed.href.slice(0, 500);
+}
+
+export function normalizeSearchMemory(memory = {}) {
+  return {
+    searches: (Array.isArray(memory.searches) ? memory.searches : []).map(entry => ({
+      text: searchMemoryText(entry.text), count: entry.count || 1, lastUsed: entry.lastUsed || 0,
+    })).filter(entry => entry.text).slice(0, 50),
+    selections: (Array.isArray(memory.selections) ? memory.selections : []).map(entry => ({
+      query: normalized(searchMemoryText(entry.query)),
+      key: entry.key?.startsWith('search-') ? `search-${normalized(searchMemoryText(entry.key.slice(7)))}`
+        : navigationUrl(entry.key || '') ? destinationKey(searchMemoryText(entry.key)) : entry.key,
+      count: entry.count || 1, lastUsed: entry.lastUsed || 0,
+    })).filter(entry => entry.query && entry.key).slice(0, 100),
+  };
+}
+
 const freshness = (time, now) => 20 / (1 + Math.max(0, now - (time || 0)) / 86400000 / 7);
 
 // Rank local destinations by relevance and habit, reserving the second row for web search.
@@ -12,6 +38,7 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
   const raw = query.trim();
   const commandsOnly = raw.startsWith('>');
   const q = normalized(commandsOnly ? raw.slice(1) : raw);
+  const memoryQuery = normalized(searchMemoryText(raw));
   const url = navigationUrl(raw);
   const question = /^(how|what|why|when|where|who|which|can|does|is|are|should)\b/.test(q) || q.split(/\s+/).length >= 4;
   const candidates = items.filter(item => commandsOnly
@@ -20,20 +47,24 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
   const destinations = new Map();
   for (const item of candidates) if (item.url) {
     item.destination = destinationKey(item.url);
-    if (!destinations.has(item.destination)) destinations.set(item.destination, item);
+    const peers = destinations.get(item.destination) || [];
+    peers.push(item); destinations.set(item.destination, peers);
   }
   for (const entry of history) {
     const key = destinationKey(entry.url);
     const existing = destinations.get(key);
     if (existing) {
-      existing.visitCount = (existing.visitCount || 0) + (entry.visitCount || 0);
-      existing.lastVisitTime = Math.max(existing.lastVisitTime || 0, entry.lastVisitTime || 0);
+      for (const item of existing) {
+        item.visitCount = (item.visitCount || 0) + (entry.visitCount || 0);
+        item.lastVisitTime = Math.max(item.lastVisitTime || 0, entry.lastVisitTime || 0);
+        item.searchDetail = `${item.searchDetail || ''} ${entry.title || ''}`;
+      }
       continue;
     }
     const item = { key: `history-${entry.id}`, kind: 'navigate', text: entry.url, url: entry.url, destination: key,
       label: entry.title || new URL(entry.url).hostname, detail: entry.url, searchDetail: entry.url,
       badge: 'History', visitCount: entry.visitCount, lastVisitTime: entry.lastVisitTime };
-    destinations.set(key, item); candidates.push(item);
+    destinations.set(key, [item]); candidates.push(item);
   }
   for (const entry of memory.searches || []) candidates.push({ key: `search-${normalized(entry.text)}`, kind: 'search', text: entry.text,
     label: entry.text, detail: 'Search again with your default search engine', badge: 'Recent search', count: entry.count, lastVisitTime: entry.lastUsed });
@@ -41,7 +72,6 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
   for (const item of candidates) {
     const command = ['action', 'space'].includes(item.kind);
     if (commandsOnly && !command) continue;
-    if (item.destination && destinations.get(item.destination) !== item) continue;
     const match = searchScore(item.label, `${item.url || ''} ${item.searchDetail || ''} ${item.detail || ''}`, q);
     if (match < 0) continue;
     let score = q ? Math.min(match, 180) : 0;
@@ -57,7 +87,7 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
     score += Math.min(30, Math.log2(1 + (item.visitCount || item.count || 0)) * 6);
     score += freshness(item.lastVisitTime || item.lastAccessed, now);
     if (item.spaceId === spaceId) score += 6;
-    const selected = (memory.selections || []).find(entry => entry.query === q && entry.key === (item.destination || item.key));
+    const selected = (memory.selections || []).find(entry => entry.query === memoryQuery && (entry.key === (item.kind === 'pin' ? item.key : item.destination || item.key) || item.kind === 'pin' && entry.key === item.destination));
     if (q && selected) score += Math.min(55, 15 + Math.log2(1 + selected.count) * 12);
     scored.push({ item, score });
   }

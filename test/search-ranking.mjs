@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const moduleUrl = source => 'data:text/javascript;base64,' + Buffer.from(source).toString('base64');
 const searchUrl = moduleUrl(fs.readFileSync(new URL('../src/search.js', import.meta.url), 'utf8'));
-const { rankSearch } = await import(moduleUrl(fs.readFileSync(new URL('../src/search-ranking.js', import.meta.url), 'utf8').replaceAll('./search.js', searchUrl)));
+const sharedUrl = moduleUrl(fs.readFileSync(new URL('../src/shared.js', import.meta.url), 'utf8'));
+const { rankSearch, destinationKey, searchMemoryText, normalizeSearchMemory } = await import(moduleUrl(fs.readFileSync(new URL('../src/search-ranking.js', import.meta.url), 'utf8').replaceAll('./search.js', searchUrl).replaceAll('./shared.js', sharedUrl)));
 const now = Date.now();
 const pin = { key: 'pin-1', kind: 'pin', label: 'GitHub', url: 'https://github.com/', spaceId: 'work' };
 const ordinary = { key: 'tab-1', kind: 'tab', label: 'Ordinary tab', url: 'https://ordinary.example/', spaceId: 'work' };
@@ -36,3 +37,22 @@ const many = Array.from({ length: 15 }, (_, i) => ({ id: `many-${i}`, title: `Pr
 assert.ok(rank('project', { history: many }).length > 4);
 assert.equal(rank('project', { history: many })[1].badge, 'Search web');
 console.log('PASS ranking: current-space pins, Essentials, no ordinary tabs, fixed second-row search, history deduplication, local habits, recent searches, and scrollable result count');
+
+const folderPins = [
+  { ...pin, key: 'dashboard', label: 'Dashboard', url: 'https://app.example/#/dashboard' },
+  { ...pin, key: 'reports', label: 'Reports', url: 'https://app.example/#/reports' },
+];
+assert.notEqual(destinationKey(folderPins[0].url), destinationKey(folderPins[1].url));
+assert.equal(rank('Reports', { items: folderPins, history: [] })[0].key, 'reports');
+const sharedUrlPins = [{ ...pin, key: 'essential', label: 'Company', spaceId: null }, { ...pin, key: 'work', label: 'Work tickets' }];
+assert.equal(rank('Work tickets', { items: sharedUrlPins })[0].key, 'work');
+assert.equal(rank('', { items: sharedUrlPins, history: [] }).filter(item => item.kind === 'pin').length, 2);
+const renamed = { ...pin, label: 'Team board', url: 'https://app.example/doc/123' };
+assert.equal(rank('Monthly planning', { items: [renamed], history: [{ id: 'alias', title: 'Monthly planning', url: renamed.url }] })[0].key, renamed.key);
+const tokenUrl = 'https://user:password@app.example/callback?code=dummy-secret&view=inbox#access_token=dummy-token';
+assert.equal(searchMemoryText(tokenUrl), 'https://app.example/callback?view=inbox');
+const migrated = normalizeSearchMemory({ searches: [{ text: tokenUrl }], selections: [{ query: tokenUrl, key: tokenUrl }, { query: tokenUrl, key: 'search-' + tokenUrl }] });
+assert.ok(!JSON.stringify(migrated).includes('dummy-'));
+assert.ok(!JSON.stringify(migrated).includes('password'));
+assert.ok(searchMemoryText('https://app.example/#/reports').endsWith('#/reports'));
+console.log('PASS regressions: distinct folder pins, duplicate URLs, history-title aliases, and sanitizing new/existing search memory');

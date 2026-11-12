@@ -12,7 +12,7 @@
 // restarts but not browser restarts; on a fresh browser session `reconcile()` rebuilds it
 // from the restored tab groups and tab URLs.
 
-import { destinationKey } from './search-ranking.js';
+import { destinationKey, searchMemoryText, normalizeSearchMemory } from './search-ranking.js';
 import { isNewTabUrl, navigationUrl } from './search.js';
 import { COLORS, newId, sameUrl, isDrifted, isWebUrl, redactUrl } from './shared.js';
 
@@ -120,10 +120,11 @@ async function flush() {
 }
 
 const ready = (async () => {
-  const [{ config: c }, { rt: r }] = await Promise.all([
-    chrome.storage.local.get('config'),
+  const [{ config: c, searchMemory }, { rt: r }] = await Promise.all([
+    chrome.storage.local.get(['config', 'searchMemory']),
     chrome.storage.session.get('rt'),
   ]);
+  if (searchMemory) await chrome.storage.local.set({ searchMemory: normalizeSearchMemory(searchMemory) });
   config = normalizeConfig(c);
   rt = { ...emptyRt(), ...r };
   touchConfig(); // Persist schema migrations as well as first-run defaults.
@@ -447,9 +448,10 @@ const handlers = {
     setWindowSpace(windowId, spaceId);
     const [cur] = await chrome.tabs.query({ windowId, active: true });
     if (!cur || tabSpaceOf(cur) !== spaceId) {
-      // An empty space just shows empty; we don't spawn a New Tab on every switch.
+      // An empty space gets its own native New Tab; later switches reuse it.
       const next = await pickSuccessor(windowId, spaceId);
       if (next) await safe(() => chrome.tabs.update(next.id, { active: true }));
+      else await createTabInSpace(windowId, spaceId);
     }
     await applyCollapse(windowId);
   },
@@ -1015,10 +1017,10 @@ Object.assign(handlers, {
       chrome.history.search({ text: '', startTime: Date.now() - 90 * 86400000, maxResults: 2000 }).catch(() => []),
       chrome.storage.local.get('searchMemory'),
     ]);
-    return { history: history.filter(entry => /^https?:\/\//i.test(entry.url)).map(entry => ({ ...entry, url: redactUrl(entry.url) })).filter(entry => entry.url),
+    return { history: history.filter(entry => /^https?:\/\//i.test(entry.url)).map(entry => ({ ...entry, url: redactUrl(entry.url, { keepHash: true }) })).filter(entry => entry.url),
       memory: stored.searchMemory || {}, config, rt: { tabPin: rt.tabPin, tabSpace: rt.tabSpace, groupSpace: rt.groupSpace, mru: rt.mru },
       tabs: await chrome.tabs.query({ windowId: tab.windowId }), windowId: tab.windowId, tabId: tab.id,
-      spaceId: tabSpaceOf(tab) || windowSpace(tab.windowId) };
+      spaceId: windowSpace(tab.windowId) };
   },
   async closeCommandOverlay({ token }, sender) {
     await overlaySource(token, sender);
@@ -1028,7 +1030,7 @@ Object.assign(handlers, {
   async commandAction({ token, kind, id, text, query }, sender) {
     const tab = await overlaySource(token, sender);
     const windowId = tab.windowId;
-    const spaceId = tabSpaceOf(tab) || windowSpace(windowId);
+    const spaceId = windowSpace(windowId);
     let chosenUrl;
     if (kind === 'navigate' || kind === 'search') {
       const query = text?.trim();
@@ -1066,18 +1068,19 @@ Object.assign(handlers, {
       return handlers.createFolder({ spaceId, name: text });
     } else throw new Error('Unknown search action.');
     if (['navigate', 'search', 'tab', 'pin'].includes(kind)) {
-      const { searchMemory = {} } = await chrome.storage.local.get('searchMemory');
+      const stored = await chrome.storage.local.get('searchMemory');
+      const searchMemory = normalizeSearchMemory(stored.searchMemory);
       const now = Date.now();
-      const typed = typeof query === 'string' ? query.trim().toLocaleLowerCase().slice(0, 500) : '';
+      const typed = searchMemoryText(query).toLocaleLowerCase();
       const searches = searchMemory.searches || [];
       if (kind === 'search' || (kind === 'navigate' && !navigationUrl(text || ''))) {
-        const phrase = text.trim().slice(0, 500);
+        const phrase = searchMemoryText(text);
         const previous = searches.find(entry => entry.text.toLocaleLowerCase() === phrase.toLocaleLowerCase());
         searchMemory.searches = [{ text: phrase, count: (previous?.count || 0) + 1, lastUsed: now },
           ...searches.filter(entry => entry !== previous)].slice(0, 50);
       }
       if (typed) {
-        const key = chosenUrl ? destinationKey(redactUrl(chosenUrl) || chosenUrl) : `search-${text.trim().toLocaleLowerCase()}`;
+        const key = kind === 'pin' ? `pin-${id}` : chosenUrl ? destinationKey(searchMemoryText(chosenUrl)) : `search-${searchMemoryText(text).toLocaleLowerCase()}`;
         const selections = searchMemory.selections || [];
         const previous = selections.find(entry => entry.query === typed && entry.key === key);
         searchMemory.selections = [{ query: typed, key, count: (previous?.count || 0) + 1, lastUsed: now },

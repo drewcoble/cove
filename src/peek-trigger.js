@@ -22,6 +22,9 @@ function site(hostname) {
 }
 
 window.addEventListener('click', event => {
+  // Reloading Cove invalidates this document's extension connection. Let the
+  // original link and page handlers run, preserving targets and user activation.
+  if (!chrome.runtime?.id) return;
   if (!event.isTrusted || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
   const link = event.composedPath().find(node => node instanceof HTMLAnchorElement && node.href);
   if (!link || !/^https?:/i.test(link.href) || link.hasAttribute('download')) return;
