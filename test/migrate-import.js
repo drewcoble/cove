@@ -25,6 +25,8 @@
       'spaces restored with names, icons, colors and order: ' + JSON.stringify(c.spaces.map(s => s.name)));
     ok(c.essentials.length === 2 && c.essentials.map(id => c.pins[id].title).includes('Inbox'), 'Essentials restored without duplicates, custom name kept');
     ok(c.pins[c.spaces[0].pins[0]]?.title === 'Team PRs', 'pinned tab custom name restored');
+    const reviews = Object.values(c.folders).find(f => f.name === 'Reviews');
+    ok(reviews && c.folders[reviews.parentId]?.name === 'Projects' && c.pins[c.spaces[0].pins[0]].folderId === reviews.id, 'nested folders and pin membership survive export/import');
     ok(c.settings.collapseInactive === false && c.settings.peekInSplitView === true, 'settings restored');
     const boundPins = new Set(Object.values(r.tabPin));
     ok(Object.keys(c.pins).every(id => boundPins.has(id)), 'every pin re-attached to its open tab (incl. the drifted one)');

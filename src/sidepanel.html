@@ -18,6 +18,8 @@
       </form>
     </header>
 
+    <button id="command-launch" class="command-launch">Search tabs or run a command <kbd>⌥K</kbd></button>
+
     <section id="essentials" class="zone"></section>
 
     <main id="space">
@@ -41,6 +43,7 @@
     </main>
 
     <footer id="bottombar">
+      <button id="archive-launch" class="icon-btn" title="Archive and undo closed tabs" aria-label="Open archive">↶</button>
       <button id="settings" class="icon-btn" title="Settings"></button>
       <div id="spaces"></div>
       <button id="add-space" class="icon-btn" title="New space"></button>
@@ -49,6 +52,14 @@
     <div id="menu" hidden></div>
     <div id="popover" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
+    <dialog id="organizer-dialog" aria-labelledby="organizer-title">
+      <header class="dialog-heading"><h2 id="organizer-title">Command bar</h2><button id="organizer-close" aria-label="Close">✕</button></header>
+      <input id="organizer-search" type="search" autocomplete="off" spellcheck="false" aria-label="Search tabs and commands" role="combobox" aria-expanded="true" aria-controls="organizer-results" aria-autocomplete="list">
+      <div id="organizer-tools" hidden><button id="archive-undo">Undo last close</button><span>Up to 500 closed tabs</span></div>
+      <p id="organizer-error" role="alert" hidden></p>
+      <div id="organizer-results" role="listbox" aria-label="Results"></div>
+      <p class="dialog-help">↑ ↓ to choose · Enter to open · Esc to close</p>
+    </dialog>
 
     <script type="module" src="sidepanel.js"></script>
   </body>
