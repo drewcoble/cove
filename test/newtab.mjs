@@ -54,14 +54,14 @@ export async function run({ cdp, sessionId: control, extId, base }) {
     ok(await evaluate(page.session, "document.title === 'Search — Cove' && !!document.querySelector('#search[role=combobox]')"), 'standalone fallback renders the accessible search panel');
     ok(!(await evaluate(page.session, "document.querySelector('#results').textContent.includes('Cove')")), 'launcher excludes extension UI and itself from suggestions');
     await search(page.session, 'planning');
-    ok(await evaluate(page.session, "document.querySelector('#results .result').dataset.kind === 'tab'"), 'matching open tab ranks before web search');
+    ok(await evaluate(page.session, "document.querySelector('#results .result').dataset.kind === 'navigate' && document.querySelectorAll('#results .result')[1].dataset.kind === 'search'"), 'history ranks before second-row web search without ordinary-tab suggestions');
     const before = await evaluate(page.session, "document.querySelector('#search').getAttribute('aria-activedescendant')");
     await key(page.session, 'ArrowDown');
     ok(await evaluate(page.session, `document.querySelector('#search').getAttribute('aria-activedescendant') !== ${JSON.stringify(before)}`), 'arrow keys move the accessible selection');
     await key(page.session, 'ArrowUp');
     await enter(page.session);
-    await wait(async () => !(await tab(page.id)));
-    ok((await tab(source)).active, 'selecting an existing tab activates it and removes the launcher');
+    await wait(async () => (await tab(page.id))?.url === base + '/planning');
+    ok(!!(await tab(source)) && page.id !== source, 'history navigation reuses the launcher and preserves the ordinary source tab');
     ok(!(await config()).archive.some(e => e.tabId === page.id), 'dismissed New Tab does not pollute the archive');
 
     page = await newtab();
@@ -94,7 +94,13 @@ export async function run({ cdp, sessionId: control, extId, base }) {
     await send('switchSpace', { windowId: W, spaceId: main });
     page = await newtab();
     await search(page.session, 'Design handbook');
-    ok(await evaluate(page.session, "document.querySelector('#results .result').dataset.kind === 'pin'"), 'search finds unloaded pins across spaces');
+    ok(await evaluate(page.session, "![...document.querySelectorAll('#results .result')].some(n => n.dataset.kind === 'pin')"), 'other-space pins are excluded from fallback search');
+    await key(page.session, 'Escape');
+    await dismiss(page);
+    await send('switchSpace', { windowId: W, spaceId: other });
+    page = await newtab();
+    await search(page.session, 'Design handbook');
+    ok(await evaluate(page.session, "document.querySelector('#results .result').dataset.kind === 'pin'"), 'search finds unloaded pins in the selected space');
     ok(await evaluate(page.session, "document.querySelector('#results .result').textContent.includes('Resources')"), 'pin search displays its folder path');
     await enter(page.session);
     await wait(async () => !(await tab(page.id)));

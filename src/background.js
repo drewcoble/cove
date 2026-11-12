@@ -881,6 +881,41 @@ Object.assign(handlers, {
   },
 });
 
+async function searchContext(tab) {
+  const [history, stored] = await Promise.all([
+    chrome.history.search({ text: '', startTime: Date.now() - 90 * 86400000, maxResults: 2000 }).catch(() => []),
+    chrome.storage.local.get('searchMemory'),
+  ]);
+  return { history: history.filter(entry => /^https?:\/\//i.test(entry.url)).map(entry => ({ ...entry, url: redactUrl(entry.url, { keepHash: true }) })).filter(entry => entry.url),
+    memory: stored.searchMemory || {}, config, rt: { tabPin: rt.tabPin, tabSpace: rt.tabSpace, groupSpace: rt.groupSpace, mru: rt.mru, activeSpace: rt.activeSpace },
+    tabs: await chrome.tabs.query({ windowId: tab.windowId }), windowId: tab.windowId, tabId: tab.id,
+    spaceId: windowSpace(tab.windowId) };
+}
+
+async function rememberSearch({ kind, id, text, query, chosenUrl }) {
+  if (['navigate', 'search', 'tab', 'pin'].includes(kind)) {
+    const stored = await chrome.storage.local.get('searchMemory');
+    const searchMemory = normalizeSearchMemory(stored.searchMemory);
+    const now = Date.now();
+    const typed = searchMemoryText(query).toLocaleLowerCase();
+    const searches = searchMemory.searches || [];
+    if (kind === 'search' || (kind === 'navigate' && !navigationUrl(text || ''))) {
+      const phrase = searchMemoryText(text);
+      const previous = searches.find(entry => entry.text.toLocaleLowerCase() === phrase.toLocaleLowerCase());
+      searchMemory.searches = [{ text: phrase, count: (previous?.count || 0) + 1, lastUsed: now },
+        ...searches.filter(entry => entry !== previous)].slice(0, 50);
+    }
+    if (typed) {
+      const key = kind === 'pin' ? `pin-${id}` : chosenUrl ? destinationKey(searchMemoryText(chosenUrl)) : `search-${searchMemoryText(text).toLocaleLowerCase()}`;
+      const selections = searchMemory.selections || [];
+      const previous = selections.find(entry => entry.query === typed && entry.key === key);
+      searchMemory.selections = [{ query: typed, key, count: (previous?.count || 0) + 1, lastUsed: now },
+        ...selections.filter(entry => entry !== previous)].slice(0, 100);
+    }
+    await chrome.storage.local.set({ searchMemory });
+  }
+}
+
 // New Tab commands run in the worker so switching away can safely close the
 // launcher after activation, even when its page is no longer running.
 async function launcherTab(tabId) {
@@ -915,16 +950,20 @@ Object.assign(handlers, {
     const previous = (rt.mru[tab.windowId] || []).find(id => id !== tab.id);
     return { tabId: tab.id, windowId: tab.windowId, spaceId, previousTabId: previous ?? null };
   },
-  async navigateNewTab({ tabId, text }) {
+  async newTabSearchContext({ tabId }) {
+    return searchContext(await launcherTab(tabId));
+  },
+  async navigateNewTab({ tabId, text, query: typedQuery, forceSearch = false }) {
     const tab = await launcherTab(tabId);
     const query = text?.trim();
     if (!query) return;
-    const url = navigationUrl(query);
+    const url = forceSearch ? null : navigationUrl(query);
     // Reuse the launcher tab, including its space and position in the group.
     if (url) await safe(() => chrome.tabs.update(tab.id, { url }));
     else await chrome.search.query({ text: query, tabId: tab.id });
+    await rememberSearch({ kind: url ? 'navigate' : 'search', text: query, query: typedQuery ?? query, chosenUrl: url });
   },
-  async selectNewTabResult({ tabId, kind, id }) {
+  async selectNewTabResult({ tabId, kind, id, query }) {
     const tab = await launcherTab(tabId);
     let target;
     if (kind === 'tab') {
@@ -949,6 +988,7 @@ Object.assign(handlers, {
       if (!restored.length) throw new Error('That tab has already been restored.');
       target = await getTab(restored[0]);
     } else throw new Error('Unknown search result.');
+    await rememberSearch({ kind, id, query, chosenUrl: kind === 'pin' ? config.pins[id]?.url : target?.url });
     return dismissLauncher(tab, target);
   },
   async dismissNewTab({ tabId, previousTabId }) {
@@ -1013,14 +1053,7 @@ Object.assign(handlers, {
   },
   async commandContext({ token }, sender) {
     const tab = await overlaySource(token, sender);
-    const [history, stored] = await Promise.all([
-      chrome.history.search({ text: '', startTime: Date.now() - 90 * 86400000, maxResults: 2000 }).catch(() => []),
-      chrome.storage.local.get('searchMemory'),
-    ]);
-    return { history: history.filter(entry => /^https?:\/\//i.test(entry.url)).map(entry => ({ ...entry, url: redactUrl(entry.url, { keepHash: true }) })).filter(entry => entry.url),
-      memory: stored.searchMemory || {}, config, rt: { tabPin: rt.tabPin, tabSpace: rt.tabSpace, groupSpace: rt.groupSpace, mru: rt.mru },
-      tabs: await chrome.tabs.query({ windowId: tab.windowId }), windowId: tab.windowId, tabId: tab.id,
-      spaceId: windowSpace(tab.windowId) };
+    return searchContext(tab);
   },
   async closeCommandOverlay({ token }, sender) {
     await overlaySource(token, sender);
@@ -1067,27 +1100,7 @@ Object.assign(handlers, {
       if (!text?.trim()) throw new Error('Enter a folder name.');
       return handlers.createFolder({ spaceId, name: text });
     } else throw new Error('Unknown search action.');
-    if (['navigate', 'search', 'tab', 'pin'].includes(kind)) {
-      const stored = await chrome.storage.local.get('searchMemory');
-      const searchMemory = normalizeSearchMemory(stored.searchMemory);
-      const now = Date.now();
-      const typed = searchMemoryText(query).toLocaleLowerCase();
-      const searches = searchMemory.searches || [];
-      if (kind === 'search' || (kind === 'navigate' && !navigationUrl(text || ''))) {
-        const phrase = searchMemoryText(text);
-        const previous = searches.find(entry => entry.text.toLocaleLowerCase() === phrase.toLocaleLowerCase());
-        searchMemory.searches = [{ text: phrase, count: (previous?.count || 0) + 1, lastUsed: now },
-          ...searches.filter(entry => entry !== previous)].slice(0, 50);
-      }
-      if (typed) {
-        const key = kind === 'pin' ? `pin-${id}` : chosenUrl ? destinationKey(searchMemoryText(chosenUrl)) : `search-${searchMemoryText(text).toLocaleLowerCase()}`;
-        const selections = searchMemory.selections || [];
-        const previous = selections.find(entry => entry.query === typed && entry.key === key);
-        searchMemory.selections = [{ query: typed, key, count: (previous?.count || 0) + 1, lastUsed: now },
-          ...selections.filter(entry => entry !== previous)].slice(0, 100);
-      }
-      await chrome.storage.local.set({ searchMemory });
-    }
+    await rememberSearch({ kind, id, text, query, chosenUrl });
     return true;
   },
 });
@@ -1693,13 +1706,17 @@ async function reconcile() {
     else rt.mru[wid] = rt.mru[wid].filter(id => liveTabs.has(id));
   }
 
-  const tryBind = (t, spaceId) => {
+  const tryBind = (t, spaceId, exactOnly) => {
     if (!initial || rt.tabPin[t.id]) return;
     const url = t.url || t.pendingUrl;
-    const pinId = (pinList(spaceId) ?? []).find(pid => {
+    const exact = value => value && destinationKey(url) === destinationKey(value);
+    const available = (pinList(spaceId) ?? []).filter(pid => !bound.has(`${pid}:${t.windowId}`));
+    const pinId = available.find(pid => exact(config.pins[pid].url)) || (!exactOnly && available.find(pid => {
       const p = config.pins[pid];
-      return !bound.has(`${pid}:${t.windowId}`) && (sameUrl(url, p.lastUrl) || !isDrifted(p, url));
-    });
+      // A saved hash route must never adopt a different route on the same page.
+      if (new URL(p.url).hash && sameUrl(url, p.url)) return false;
+      return exact(p.lastUrl) || (p.aliases || []).some(exact) || !isDrifted(p, url);
+    }));
     if (pinId) {
       rt.tabPin[t.id] = pinId;
       bound.add(`${pinId}:${t.windowId}`);
@@ -1707,12 +1724,22 @@ async function reconcile() {
   };
 
   for (const w of windows) {
+    const active = w.tabs.find(t => t.active);
+    if (!spaceById(rt.activeSpace[w.id])) {
+      rt.activeSpace[w.id] = (active && (rt.groupSpace[active.groupId] || rt.tabSpace[active.id])) ||
+        (spaceById(rt.lastSpace) ? rt.lastSpace : config.spaces[0].id);
+    }
+    // Keep broad redirect/last-URL matches from stealing another tab's exact pin.
+    for (const exactOnly of [true, false]) for (const t of w.tabs) {
+      if (rt.tabPeeks[t.id]?.split) continue;
+      const spaceId = t.pinned ? null : rt.groupSpace[t.groupId] || rt.tabSpace[t.id] || rt.activeSpace[w.id];
+      tryBind(t, spaceId, exactOnly);
+    }
     const ungrouped = [];
     for (const t of w.tabs) {
       if (rt.tabPeeks[t.id]?.split) continue;
       if (t.pinned) {
         delete rt.tabSpace[t.id];
-        tryBind(t, null);
         if (!rt.tabPin[t.id]) {
           const pin = createPin(t, null);
           rt.tabPin[t.id] = pin.id;
@@ -1728,17 +1755,10 @@ async function reconcile() {
       rt.tabSpace[t.id] = spaceId;
       const pid = rt.tabPin[t.id];
       if (pid && config.pins[pid].spaceId !== spaceId) delete rt.tabPin[t.id];
-      tryBind(t, spaceId);
-    }
-    const active = w.tabs.find(t => t.active);
-    if (!spaceById(rt.activeSpace[w.id])) {
-      rt.activeSpace[w.id] =
-        (active && rt.tabSpace[active.id]) || (spaceById(rt.lastSpace) ? rt.lastSpace : config.spaces[0].id);
     }
     for (const t of ungrouped) {
       const spaceId = spaceById(rt.tabSpace[t.id]) ? rt.tabSpace[t.id] : rt.activeSpace[w.id];
       await putTabInSpace(t, spaceId).catch(e => console.warn('[cove] group failed', e));
-      tryBind(t, spaceId);
     }
     if (!rt.mru[w.id]) {
       rt.mru[w.id] = [...w.tabs].sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)).map(t => t.id);

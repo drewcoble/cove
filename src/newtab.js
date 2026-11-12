@@ -1,6 +1,6 @@
 import { COLORS } from './shared.js';
 import { searchCatalog } from './search-catalog.js';
-import { navigationUrl, searchScore } from './search.js';
+import { rankSearch, searchScore } from './search-ranking.js';
 
 const $ = selector => document.querySelector(selector);
 const input = $('#search');
@@ -20,6 +20,8 @@ let context;
 let config;
 let rt = {};
 let tabs = [];
+let history = [];
+let memory = {};
 let choices = [];
 let selected = 0;
 let mode = 'all';
@@ -41,7 +43,7 @@ function showError(error) {
 }
 function spaceId() {
   const known = id => config?.spaces.some(space => space.id === id);
-  const id = rt.tabSpace?.[context.tabId] || rt.activeSpace?.[context.windowId] || context.spaceId;
+  const id = rt.activeSpace?.[context.windowId] || rt.tabSpace?.[context.tabId] || context.spaceId;
   return known(id) ? id : config.spaces[0].id;
 }
 function favicon(url) {
@@ -50,7 +52,7 @@ function favicon(url) {
 
 function catalog() {
   return searchCatalog({ config, rt, tabs, windowId: context.windowId, excludeTabId: context.tabId,
-    spaceId: spaceId(), mode, root }).map(item => {
+    spaceId: spaceId(), mode, root, spacePinsOnly: true }).map(item => {
     if (item.kind !== 'action') return item;
     const actions = {
       folder: openFolderForm,
@@ -67,22 +69,14 @@ function render(preserveSelection = true) {
   const raw = input.value.trim();
   const commandsOnly = mode === 'all' && raw.startsWith('>');
   const query = commandsOnly ? raw.slice(1).trim() : raw;
-  const candidates = catalog().filter(item => !commandsOnly || item.kind === 'action' || item.kind === 'space');
-  const matching = candidates.map(item => ({ item, score: searchScore(item.label, `${item.detail} ${item.searchDetail || ''}`, query) }))
-    .filter(entry => entry.score >= 0).sort((a, b) => b.score - a.score).map(entry => entry.item);
-  const total = matching.length;
-  choices = matching.slice(0, query ? 7 : 6);
-  if (mode === 'all' && query && !commandsOnly) {
-    const url = navigationUrl(query);
-    choices.push({ key: 'navigate', kind: 'navigate', label: url ? `Go to ${query}` : `Search for “${query}”`,
-      detail: url ? 'Open in this tab' : 'Use your default search engine', badge: url ? 'Visit' : 'Search web', icon: url ? 'globe' : 'search',
-      action: () => send('navigateNewTab', { tabId: context.tabId, text: query }),
-    });
-  }
+  choices = mode === 'archive'
+    ? catalog().map(item => ({ item, score: searchScore(item.label, item.searchDetail, query) }))
+      .filter(entry => entry.score >= 0).sort((a, b) => b.score - a.score).slice(0, 50).map(entry => entry.item)
+    : rankSearch({ items: catalog(), history, memory, query: raw, spaceId: spaceId() });
   selected = Math.max(0, choices.findIndex(item => item.key === oldKey));
   $('#clear-search').hidden = !raw;
-  $('#results-heading').textContent = mode === 'archive' ? 'Your archived tabs' : commandsOnly ? 'Commands' : query ? 'Tabs, pins, and spaces' : 'Pick up where you left off';
-  $('#result-count').textContent = total > matching.slice(0, query ? 7 : 6).length ? `${Math.min(query ? 7 : 6, total)} of ${total}` : '';
+  $('#results-heading').textContent = mode === 'archive' ? 'Your archived tabs' : commandsOnly ? 'Commands' : query ? 'Pins, history, and search' : 'Pick up where you left off';
+  $('#result-count').textContent = choices.length ? `${choices.length} results` : '';
   results.replaceChildren();
   for (const [i, choice] of choices.entries()) {
     const button = document.createElement('button');
@@ -96,19 +90,20 @@ function render(preserveSelection = true) {
     button.title = `${choice.label}\n${choice.searchDetail || choice.detail}`;
     const icon = document.createElement('span');
     icon.className = 'result-icon';
-    const src = favicon(choice.url);
+    const src = choice.kind === 'search' ? null : favicon(choice.url);
     if (src) {
       const img = document.createElement('img');
       img.alt = '';
       img.src = src;
-      img.onerror = () => icon.innerHTML = svg(choice.icon);
+      img.onerror = () => icon.innerHTML = svg(choice.kind === 'search' ? 'search' : choice.icon);
       icon.append(img);
-    } else icon.innerHTML = svg(choice.icon);
+    } else icon.innerHTML = svg(choice.kind === 'search' ? 'search' : choice.icon);
     const text = document.createElement('span'); text.className = 'result-text';
     const label = document.createElement('span'); label.className = 'result-title'; label.textContent = choice.label;
     const detail = document.createElement('span'); detail.className = 'result-detail'; detail.textContent = choice.detail;
     text.append(label, detail);
     const badge = document.createElement('span'); badge.className = 'result-kind'; badge.textContent = choice.badge;
+    if (choice.kind === 'pin') badge.classList.add('switch-to-tab');
     const enter = document.createElement('span'); enter.className = 'result-enter'; enter.textContent = '↵'; enter.setAttribute('aria-hidden', 'true');
     button.append(icon, text, badge, enter);
     button.addEventListener('pointermove', () => { if (selected !== i) { selected = i; updateSelection(false); } });
@@ -125,7 +120,8 @@ function render(preserveSelection = true) {
   $('#space-name').textContent = space.name;
   document.documentElement.style.setProperty('--space', COLORS[space.color] || COLORS.purple);
   $('#announcements').textContent = `${choices.length} ${choices.length === 1 ? 'result' : 'results'} available.`;
-  updateSelection(false);
+  if (!preserveSelection) results.scrollTop = 0;
+  updateSelection(preserveSelection);
 }
 function updateSelection(scroll = true) {
   [...results.querySelectorAll('[role=option]')].forEach((node, i) => node.setAttribute('aria-selected', String(i === selected)));
@@ -141,7 +137,8 @@ async function execute(choice) {
   $('#error').hidden = true;
   try {
     if (choice.action) await choice.action();
-    else await send('selectNewTabResult', { tabId: context.tabId, kind: choice.kind, id: choice.id });
+    else if (choice.kind === 'navigate' || choice.kind === 'search') await send('navigateNewTab', { tabId: context.tabId, text: choice.text, query: input.value, forceSearch: choice.kind === 'search' });
+    else await send('selectNewTabResult', { tabId: context.tabId, kind: choice.kind, id: choice.id, query: input.value });
   } catch (error) { showError(error); }
   finally { busy = false; $('.search-panel').removeAttribute('aria-busy'); }
 }
@@ -155,14 +152,14 @@ function changeMode(next) {
 }
 async function refresh() {
   const version = ++generation;
-  const [local, session, currentTabs] = await Promise.all([
-    chrome.storage.local.get('config'), chrome.storage.session.get('rt'), chrome.tabs.query({ windowId: context.windowId }),
-  ]);
+  const data = await send('newTabSearchContext', { tabId: context.tabId });
   if (version !== generation) return;
-  if (!local.config) throw new Error('Your spaces are still loading. Reload this page to try again.');
-  config = local.config;
-  rt = session.rt || {};
-  tabs = currentTabs;
+  context.spaceId = data.spaceId;
+  config = data.config;
+  rt = data.rt;
+  tabs = data.tabs;
+  history = data.history;
+  memory = data.memory;
   ready = true;
   render();
 }
