@@ -15,25 +15,26 @@ export const COLORS = {
 
 export const newId = () => crypto.randomUUID().replace(/-/g, '').slice(0, 12);
 
-export function normUrl(url) {
+export function normUrl(url, { keepHash = false } = {}) {
   if (!url) return '';
   try {
     const u = new URL(url);
+    const hash = keepHash ? u.hash : '';
     u.hash = '';
-    return u.href.replace(/\/$/, '');
+    return u.href.replace(/\/$/, '') + hash;
   } catch {
     return url;
   }
 }
 
-export const sameUrl = (a, b) => !!a && !!b && normUrl(a) === normUrl(b);
+export const sameUrl = (a, b, options) => !!a && !!b && normUrl(a, options) === normUrl(b, options);
 
 // A pinned tab has "drifted" once it navigates away from its pinned URL. Redirects seen
 // right after the pin was opened (gmail.com -> mail.google.com/mail/u/0) are stored as
 // aliases so they don't count as drift.
 export function isDrifted(pin, url) {
-  if (!url || sameUrl(url, pin.url)) return false;
-  return !(pin.aliases ?? []).some(a => sameUrl(a, url));
+  if (!url || sameUrl(url, pin.url, { keepHash: true })) return false;
+  return !(pin.aliases ?? []).some(a => sameUrl(a, url, { keepHash: true }));
 }
 
 export function hostname(url) {
@@ -58,9 +59,9 @@ const SENSITIVE_HASH = /(^#|[#&?])(access_token|id_token|refresh_token|token|cod
 
 // The URL minus any sensitive-looking query parameters, so sign-in callbacks like
 // `/callback?code=…#access_token=…` never end up in storage or in exported setups.
-// By default the #fragment is dropped too (for URLs Cove records on its own: redirect aliases,
-// a pinned tab's last URL). With keepHash (a URL you're pinning) it's kept unless it carries
-// a token, so app routes like `#/dashboard` still work.
+// By default the #fragment is dropped too. With keepHash it is retained unless it
+// carries a token, so saved pins, redirect aliases and last URLs can distinguish app
+// routes like `#/dashboard` without recording URL tokens.
 export function redactUrl(url, { keepHash = false } = {}) {
   try {
     const u = new URL(url);

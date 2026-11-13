@@ -1,10 +1,3 @@
-/* Registered so the gradient can animate from one space's color to the next. */
-@property --space {
-  syntax: '<color>';
-  inherits: true;
-  initial-value: #8ab4f8;
-}
-
 :root {
   --space: #8ab4f8;
   --bg: #161618;
@@ -20,11 +13,8 @@
   --menu-bg: #26262a;
   --menu-border: rgba(255, 255, 255, 0.1);
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
-  /* Background: near-neutral at the top, fading to a deeper, more saturated space color. */
-  --bg-top: color-mix(in oklab, var(--space) 5%, var(--bg));
-  --bg-bottom: color-mix(in oklab, oklch(from var(--space) 0.4 calc(c * 1.2) h) 40%, var(--bg));
+  --tint: 9%;
   color-scheme: dark;
-  transition: --space 0.35s ease;
 }
 
 @media (prefers-color-scheme: light) {
@@ -42,8 +32,7 @@
     --menu-bg: #ffffff;
     --menu-border: rgba(0, 0, 0, 0.1);
     --shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
-    --bg-top: color-mix(in oklab, var(--space) 6%, var(--bg));
-    --bg-bottom: color-mix(in oklab, oklch(from var(--space) 0.82 calc(c * 1.15) h) 45%, var(--bg));
+    --tint: 14%;
     color-scheme: light;
   }
 }
@@ -64,7 +53,8 @@ body {
   overflow: hidden;
   font: 13px/1.3 system-ui, -apple-system, 'Segoe UI', sans-serif;
   color: var(--fg);
-  background: linear-gradient(to bottom, var(--bg-top) 0%, var(--bg-top) 18%, var(--bg-bottom) 100%);
+  background: color-mix(in srgb, var(--space) var(--tint), var(--bg));
+  transition: background-color 0.25s ease;
   user-select: none;
 }
 
@@ -146,14 +136,16 @@ svg {
 /* ---------- essentials ---------- */
 
 #essentials {
-  display: grid;
-  grid-template-columns: repeat(var(--ess-cols, 4), minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 4px 8px 6px;
   min-height: 4px;
 }
 .ess {
   position: relative;
+  flex: 1 1 calc((100% - (var(--ess-cols, 4) - 1) * 6px) / var(--ess-cols, 4));
+  min-width: 0;
   height: 46px;
   display: grid;
   place-items: center;
@@ -461,6 +453,9 @@ body.dragging #essentials:empty {
 body.dragging #essentials:empty {
   margin: 4px 8px 6px;
 }
+body.dragging #essentials:empty::before {
+  flex: 1;
+}
 body.dragging #pins:empty::before,
 body.dragging #essentials:empty::before {
   content: attr(data-hint);
@@ -669,15 +664,6 @@ body.dragging #essentials:empty::before {
   font-size: 12px;
   cursor: pointer;
 }
-#popover .links {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-}
-#popover .note {
-  color: var(--muted);
-  font-size: 12px;
-}
 
 /* ---------- toast ---------- */
 
@@ -701,4 +687,90 @@ body.dragging #essentials:empty::before {
 #toast.show {
   opacity: 1;
   transform: translate(-50%, 0);
+}
+
+/* Organization and command palette. */
+.command-launch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 10px 8px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: var(--tile);
+  color: var(--muted);
+  text-align: left;
+  font-size: 11px;
+  gap: 6px;
+}
+.command-launch:hover { background: var(--tile-hover); }
+kbd { font: inherit; white-space: nowrap; opacity: .7; }
+#pins > .row { padding-left: calc(8px + var(--depth, 0) * 14px); }
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px 6px calc(10px + var(--depth, 0) * 14px);
+  border-radius: 7px;
+  text-align: left;
+  color: var(--muted);
+}
+.folder-row:hover, .folder-row.drop-target { background: var(--hover); color: var(--fg); }
+.folder-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-count { margin-left: auto; font-size: 10px; color: var(--faint); }
+.folder-chevron { width: 12px; flex-shrink: 0; }
+button:focus-visible { outline: 2px solid var(--space); outline-offset: -2px; }
+#organizer-dialog {
+  width: calc(100% - 20px);
+  max-width: 520px;
+  max-height: calc(100% - 40px);
+  box-sizing: border-box;
+  margin: 20px auto;
+  padding: 12px;
+  color: var(--fg);
+  background: var(--menu-bg);
+  border: 1px solid var(--menu-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+#organizer-dialog[open] { display: flex; flex-direction: column; }
+#organizer-dialog::backdrop { background: rgb(0 0 0 / .35); }
+.dialog-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px; }
+.dialog-heading h2 { font-size: 13px; margin: 0; }
+#organizer-close { padding: 5px 8px; border-radius: 5px; }
+#organizer-search {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  font: inherit;
+  background: var(--tile);
+  color: var(--fg);
+  border: 1px solid var(--sep);
+  border-radius: 8px;
+  outline-color: var(--space);
+}
+#organizer-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; font-size: 10px; color: var(--muted); }
+#organizer-tools[hidden] { display: none; }
+#archive-undo { color: var(--space); padding: 5px; }
+#archive-undo:disabled { opacity: .4; }
+#organizer-results { overflow-y: auto; min-height: 50px; margin-top: 10px; }
+.command-result { display: flex; flex-direction: column; gap: 4px; width: 100%; text-align: left; padding: 10px; border-radius: 7px; }
+.command-result > span, .command-result small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.command-result small { color: var(--muted); font-size: 10px; }
+.command-result[aria-selected=true], .command-result:hover { background: var(--hover); }
+.command-empty, .dialog-help { color: var(--muted); font-size: 10px; padding: 4px; }
+.dialog-help { margin-bottom: 0; }
+#toast button { margin-left: 12px; color: var(--space); font-weight: 600; pointer-events: auto; }
+
+#organizer-error { color: #f28b82; font-size: 11px; }
+#toast:not(.show) button { visibility: hidden; }
+
+#popover .links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
 }

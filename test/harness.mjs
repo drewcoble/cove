@@ -11,6 +11,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const [extArg, testFile, phase2File] = process.argv.slice(2);
 const extPath = path.resolve(extArg);
@@ -18,19 +19,22 @@ const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/redirect')) { res.writeHead(302, { Location: '/home' }); return res.end(); }
-  res.writeHead(200, { 'content-type': 'text/html' });
-  // #far points at another site (localhost vs 127.0.0.1); #blank opens a new tab on the same site.
+  const headers = { 'content-type': 'text/html' };
+  if (req.url.startsWith('/strict-csp')) headers['Content-Security-Policy'] = "default-src 'none'; script-src 'none'; style-src 'none'; connect-src 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
+  res.writeHead(200, headers);
+  // #far points at another site (localhost vs 127.0.0.1) for Essential-link tests; #blank opens a same-site tab.
   res.end(`<title>Page ${req.url}</title><a id="l" href="/other">x</a> <a id="far" href="http://localhost:${server.address().port}/far">far</a> <a id="blank" href="/opened" target="_blank">blank</a>`);
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
-const profile = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'cove-profile-'));
+const profile = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'zt-profile-'));
 const chrome = spawn(CHROME, [
   '--headless', '--remote-debugging-pipe', '--enable-unsafe-extension-debugging',
   `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank',
 ], { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
 let stderr = '';
+const pageErrors = [];
 chrome.stderr.on('data', d => (stderr += d));
 
 let id = 0;
@@ -42,6 +46,8 @@ chrome.stdio[4].on('data', d => {
   while ((i = buf.indexOf('\0')) !== -1) {
     const msg = JSON.parse(buf.slice(0, i));
     buf = buf.slice(i + 1);
+    if (msg.method === 'Runtime.exceptionThrown') pageErrors.push(msg.params.exceptionDetails.exception?.description || msg.params.exceptionDetails.text);
+    if (process.env.TRACE && msg.method === 'Runtime.consoleAPICalled') console.log(msg.params.args.map(a => a.value || a.description || '').join(' '));
     if (msg.id && pending.has(msg.id)) {
       const { resolve, reject } = pending.get(msg.id);
       pending.delete(msg.id);
@@ -64,29 +70,36 @@ try {
   await new Promise(r => setTimeout(r, 1500));
   const { targetId } = await cdp('Target.createTarget', { url: `chrome-extension://${extId}/src/sidepanel.html` });
   const { sessionId } = await cdp('Target.attachToTarget', { targetId, flatten: true });
+  await cdp('Runtime.enable', {}, sessionId);
   await new Promise(r => setTimeout(r, 1500));
-  const script = fs.readFileSync(testFile, 'utf8').replaceAll('__BASE__', base);
-  const res = await cdp('Runtime.evaluate', { expression: script, awaitPromise: true, returnByValue: true }, sessionId);
+  let res;
+  if (testFile.endsWith('.mjs')) {
+    const driver = await import(pathToFileURL(path.resolve(testFile)).href);
+    res = { result: { value: await driver.run({ cdp, sessionId, targetId, extId, base }) } };
+  } else {
+    const script = fs.readFileSync(testFile, 'utf8').replaceAll('__BASE__', base);
+    res = await cdp('Runtime.evaluate', { expression: script, awaitPromise: true, returnByValue: true }, sessionId);
+  }
   if (res.exceptionDetails) { console.error('EXCEPTION', JSON.stringify(res.exceptionDetails, null, 2)); done(1); }
-  // A phase-1 script may return JSON { log, payload }; payload is substituted for
-  // __PAYLOAD__ in the phase-2 script (used by the export -> reinstall -> import test).
-  let payload = 'null';
-  try {
-    const parsed = JSON.parse(res.result.value);
-    if (parsed && 'log' in parsed) {
-      res.result.value = parsed.log;
-      payload = JSON.stringify(parsed.payload ?? null);
-    }
-  } catch {}
   console.log(res.result.value);
   if (process.env.SHOT) {
     await cdp('Emulation.setDeviceMetricsOverride', { width: 300, height: 760, deviceScaleFactor: 2, mobile: false }, sessionId);
-    await cdp('Runtime.evaluate', { expression: "document.documentElement.style.transition='none'" }, sessionId);
+    await cdp('Runtime.evaluate', { expression: "document.body.style.transition='none'" }, sessionId);
     for (const scheme of ['dark', 'light']) {
       await cdp('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] }, sessionId);
       await new Promise(r => setTimeout(r, 600));
-      const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
-      fs.writeFileSync(process.env.SHOT + '-' + scheme + '.png', Buffer.from(shot.data, 'base64'));
+      for (const view of process.env.SHOT_VIEWS ? ['sidebar', 'commands', 'archive'] : ['sidebar']) {
+        if (view !== 'sidebar') {
+          const selector = view === 'commands' ? '#command-launch' : '#archive-launch';
+          await cdp('Runtime.evaluate', { expression: `document.querySelector(${JSON.stringify(selector)}).click()` }, sessionId);
+        } else await cdp('Runtime.evaluate', { expression: 'document.querySelector("dialog[open]")?.close()' }, sessionId);
+        await new Promise(r => setTimeout(r, 100));
+        const bounds = await cdp('Runtime.evaluate', { expression: `JSON.stringify({ overflow: document.body.scrollWidth > innerWidth, dialog: (() => { const d = document.querySelector('dialog[open]'); return d ? d.getBoundingClientRect().bottom > innerHeight : false; })() })`, returnByValue: true }, sessionId);
+        if (JSON.parse(bounds.result.value).overflow || JSON.parse(bounds.result.value).dialog) throw new Error('Layout overflow: ' + scheme + '/' + view);
+        const shot = await cdp('Page.captureScreenshot', { format: 'png' }, sessionId);
+        const suffix = process.env.SHOT_VIEWS ? '-' + view : '';
+        fs.writeFileSync(process.env.SHOT + '-' + scheme + suffix + '.png', Buffer.from(shot.data, 'base64'));
+      }
     }
   }
   let out = res.result.value;
@@ -106,12 +119,15 @@ try {
         await cdp('Target.closeTarget', { targetId: t2.targetId }).catch(() => {});
       } catch (e) { /* extension still reloading */ }
     }
-    const res2 = await cdp('Runtime.evaluate', { expression: fs.readFileSync(phase2File, 'utf8').replaceAll('__PAYLOAD__', payload), awaitPromise: true, returnByValue: true }, s2.sessionId);
+    let phase2Script = fs.readFileSync(phase2File, 'utf8');
+    if (phase2Script.includes('__PAYLOAD__')) phase2Script = phase2Script.replaceAll('__PAYLOAD__', JSON.stringify(JSON.parse(res.result.value).payload));
+    const res2 = await cdp('Runtime.evaluate', { expression: phase2Script, awaitPromise: true, returnByValue: true }, s2.sessionId);
     if (res2.exceptionDetails) { console.error('EXCEPTION', JSON.stringify(res2.exceptionDetails, null, 2)); done(1); }
     console.log('--- after extension reload (session state wiped) ---\n' + res2.result.value);
     out += res2.result.value;
   }
-  done(/FAIL/.test(out) ? 1 : 0);
+  for (const error of pageErrors) console.error('FAIL browser exception: ' + error);
+  done(/FAIL/.test(out) || pageErrors.length ? 1 : 0);
 } catch (e) {
   console.error(e, stderr.slice(-2000));
   done(1);

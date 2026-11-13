@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Cove",
-  "version": "0.1.0",
+  "version": "0.4.2",
   "description": "Vertical tabs for Chrome with spaces, pinned tabs that remember their home, shared Essentials and Peek.",
   "minimum_chrome_version": "121",
   "permissions": [
@@ -15,7 +15,7 @@
     "clipboardWrite",
     "scripting",
     "contextMenus",
-    "webNavigation"
+    "history"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -34,7 +34,8 @@
         "<all_urls>"
       ],
       "js": [
-        "src/peek-trigger.js"
+        "src/peek-trigger.js",
+        "src/command-overlay.js"
       ],
       "run_at": "document_start",
       "all_frames": true
@@ -103,6 +104,34 @@
     },
     "space-9": {
       "description": "Go to space 9"
+    },
+    "command-bar": {
+      "suggested_key": {
+        "default": "Ctrl+K",
+        "mac": "Command+K"
+      },
+      "description": "Open floating search over the current page"
+    },
+    "undo-close": {
+      "suggested_key": {
+        "default": "Alt+Shift+Z"
+      },
+      "description": "Undo the last closed tab or cleared space"
     }
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "src/search-catalog.js",
+        "src/search.js",
+        "src/shared.js",
+        "src/command-overlay.css",
+        "src/search-ranking.js",
+        "_favicon/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
 }

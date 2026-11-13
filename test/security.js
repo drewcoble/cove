@@ -80,6 +80,7 @@
     await send('updateSettings', { patch: { peekOnAltClick: false } });
     await sleep(300);
     ok((await chrome.storage.local.get('peekOnAltClick')).peekOnAltClick === false, 'flag follows the setting');
+    ok(await inPage(page.id, () => enabled === false), 'live Option-click changes reach existing content scripts without exposing the setup');
     await send('updateSettings', { patch: { peekOnAltClick: true } });
   } catch (e) {
     log.push('FAIL exception: ' + e.stack);
