@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Search — Cove</title>
+    <link rel="stylesheet" href="newtab.css">
+    <script type="module" src="newtab.js"></script>
+  </head>
+  <body>
+    <header class="page-header">
+      <a class="wordmark" href="#" aria-label="Focus search"><span class="brand-mark" aria-hidden="true">z</span> zen tabs</a>
+      <span id="space-badge" class="space-badge"><span class="space-dot" aria-hidden="true"></span><span id="space-name">Your space</span></span>
+    </header>
+    <main>
+      <section class="search-panel" aria-label="Search your space">
+        <form id="search-form" role="search" autocomplete="off">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.7" cy="10.7" r="6.7"/><path d="m16 16 4.5 4.5"/></svg>
+          <input id="search" name="search" type="text" placeholder="Search or enter URL…" autofocus spellcheck="false" autocapitalize="off" autocomplete="off" role="combobox" aria-label="Search pins, history, or the web" aria-controls="results" aria-expanded="true" aria-autocomplete="list">
+          <button id="clear-search" class="clear-search" type="button" aria-label="Clear search" hidden>✕</button>
+        </form>
+        <div class="result-heading"><span id="results-heading">Pick up where you left off</span><span id="result-count"></span></div>
+        <div id="results" role="listbox" aria-label="Search results"><p class="empty-state">Getting your spaces ready…</p></div>
+        <p id="error" class="error" role="alert" hidden></p>
+        <footer class="panel-footer">
+          <div class="keyboard-hints" aria-hidden="true"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> back</span></div>
+          <button id="archive-toggle" type="button" aria-pressed="false">Archive <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M4 4h8v9H4zM3 2h10v3H3zM6.5 7.5h3"/></svg></button>
+        </footer>
+      </section>
+      <p class="page-hint">Your pins, history, and recent searches. All a few keystrokes away.</p>
+      <p id="announcements" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+    </main>
+    <dialog id="folder-dialog" aria-labelledby="folder-title">
+      <form id="folder-form">
+        <h2 id="folder-title">New folder</h2>
+        <label for="folder-name">Name</label>
+        <input id="folder-name" maxlength="120" required autocomplete="off" placeholder="A place for your tabs">
+        <p id="folder-error" class="error" role="alert" hidden></p>
+        <div class="form-actions"><button id="folder-cancel" type="button">Cancel</button><button id="folder-save" type="submit">Create folder</button></div>
+      </form>
+    </dialog>
+  </body>
+</html>

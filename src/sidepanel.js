@@ -1,3 +1,6 @@
+import { buildTabTree, descendants } from './tab-tree.js';
+import { isNewTabUrl } from './search.js';
+import { createOrganizer } from './organizer.js';
 import { COLORS, isDrifted, pinTitle, hostname, isWebUrl } from './shared.js';
 
 // Lucide icon paths (ISC license).
@@ -41,6 +44,7 @@ const GLOBE =
 
 const $ = sel => document.querySelector(sel);
 
+let organizer;
 let windowId;
 let config;
 let rt = {};
@@ -48,11 +52,15 @@ let tabs = [];
 let drag = null;
 let shownSpaceId = null;
 let lastActiveTabId = null;
+let lastActiveRow = null;
 let spaceShortcuts = {}; // 0-based space index -> shortcut bound at chrome://extensions/shortcuts
 
 async function send(type, payload = {}) {
   const res = await chrome.runtime.sendMessage({ type, ...payload });
-  if (!res?.ok) console.warn('[cove]', type, res?.error);
+  if (!res?.ok) {
+    console.warn('[cove]', type, res?.error);
+    throw new Error(res?.error || 'The action could not be completed.');
+  }
   return res?.result;
 }
 
@@ -147,6 +155,8 @@ function syncList(container, items, keyOf, create, update) {
 // ---------------------------------------------------------------------------------------
 // Rendering
 
+const essentialColumns = n => Math.max(1, n <= 3 ? n : Math.min(5, Math.ceil(n / 2)));
+
 function render() {
   if (!config || !windowId) return;
   const spaceId = activeSpaceId();
@@ -161,45 +171,51 @@ function render() {
   const withTab = id => ({ pin: config.pins[id], tab: boundByPin.get(id) ?? null });
 
   renderToolbar();
-  const essentials = config.essentials.filter(id => config.pins[id]);
-  syncList($('#essentials'), essentials.map(withTab), x => 'p' + x.pin.id, createEssential, updateEssential);
-  $('#essentials').style.setProperty('--ess-cols', essentialColumns(essentials.length));
-  renderHeader(space);
   syncList(
-    $('#pins'),
-    space.pins.filter(id => config.pins[id]).map(withTab),
+    $('#essentials'),
+    config.essentials.filter(id => config.pins[id]).map(withTab),
     x => 'p' + x.pin.id,
-    createRow,
-    updatePinRow,
+    createEssential,
+    updateEssential,
   );
+  $('#essentials').style.setProperty('--ess-cols', essentialColumns(config.essentials.filter(id => config.pins[id]).length));
+  renderHeader(space);
+  const tree = buildTabTree(tabs, rt, space.id);
+  organizer.renderPins(space, withTab, tree);
   syncList(
     $('#tabs'),
-    tabs.filter(t => !t.pinned && !boundPinOf(t) && spaceOf(t) === space.id),
-    t => 't' + t.id,
+    [...tree.essentials.flatMap(tab => [{ tab, depth: 0, essentialRoot: true, ...tree.info(tab.id) }, ...tree.children(tab.id, 1)]), ...tree.rows],
+    entry => (entry.essentialRoot ? 'root-' : 't') + entry.tab.id,
     createRow,
-    updateTabRow,
+    (node, entry) => {
+      updateTabRow(node, entry.tab);
+      decorateTreeRow(node, entry);
+      if (entry.essentialRoot) {
+        node.dataset.kind = 'tree-root'; node.draggable = false;
+        setText(node.querySelector('.title'), `From ${pinTitle(config.pins[rt.tabPin[entry.tab.id]] || {}, entry.tab)}`);
+      }
+    },
   );
   syncList($('#spaces'), config.spaces, s => 's' + s.id, createSpaceButton, (node, s) =>
     updateSpaceButton(node, s, s.id === space.id),
   );
 
+  organizer.refresh();
   animateSwitch(space.id);
   const active = activeTab();
-  if (active && active.id !== lastActiveTabId) {
+  const activeRow = document.querySelector('#space .row.active');
+  if (active && (active.id !== lastActiveTabId || activeRow !== lastActiveRow)) {
     lastActiveTabId = active.id;
-    document.querySelector('#space .row.active')?.scrollIntoView({ block: 'nearest' });
+    lastActiveRow = activeRow;
+    activeRow?.scrollIntoView({ block: 'nearest' });
   }
 }
-
-// Up to 3 Essentials share one row; 4–10 split over two rows with the extra one on top
-// (3/2, 3/3, 4/3 … 5/5); beyond that, rows of 5.
-const essentialColumns = n => Math.max(1, n <= 3 ? n : Math.min(5, Math.ceil(n / 2)));
 
 function renderToolbar() {
   const input = $('#url');
   if (document.activeElement === input) return;
   const url = tabUrl(activeTab());
-  input.value = isWebUrl(url) ? hostname(url) : url.startsWith('chrome://newtab') ? '' : url;
+  input.value = isWebUrl(url) ? hostname(url) : isNewTabUrl(url, chrome.runtime.getURL('')) ? '' : url;
 }
 
 function renderHeader(space) {
@@ -250,6 +266,43 @@ function createRow() {
     <button class="audio icon-btn sm"></button>
     <button class="close icon-btn sm">${svg('x')}</button>`;
   return node;
+}
+
+function decorateTreeRow(node, entry) {
+  const tab = entry.tab;
+  const count = entry.childCount || 0;
+  const depth = entry.depth || 0;
+  let toggle = node.querySelector('.tree-toggle');
+  if (!toggle) {
+    toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'tree-toggle';
+    node.prepend(toggle);
+    const badge = document.createElement('span'); badge.className = 'tree-count';
+    node.insertBefore(badge, node.querySelector('.close'));
+  }
+  node.classList.add('tree-row');
+  node.classList.toggle('tree-child', depth > 0);
+  node.classList.toggle('tree-root', !!entry.essentialRoot);
+  node.style.paddingInlineStart = `${8 + Math.min(depth, 8) * 16}px`;
+  node.style.setProperty('--tree-depth', Math.min(depth, 8));
+  if (tab) node.dataset.treeTabId = tab.id; else delete node.dataset.treeTabId;
+  node.dataset.treeParentId = entry.parentId ?? '';
+  toggle.hidden = false; toggle.disabled = !count; toggle.style.visibility = count ? 'visible' : 'hidden'; toggle.textContent = entry.collapsed ? '▸' : '▾';
+  toggle.setAttribute('aria-label', `${entry.collapsed ? 'Expand' : 'Collapse'} ${count} child tab${count === 1 ? '' : 's'}`);
+  toggle.setAttribute('aria-expanded', String(!entry.collapsed));
+  const badge = node.querySelector('.tree-count'); badge.hidden = !count; badge.textContent = count;
+  badge.title = `${count} child tab${count === 1 ? '' : 's'}`;
+  node.dataset.treeDepth = depth;
+}
+function toggleTree(node) {
+  return send('toggleTabTree', { windowId, tabId: +node.dataset.treeTabId, spaceId: activeSpaceId() });
+}
+function ordinaryTabClick(e, node) {
+  const tabId = +node.dataset.id;
+  if (e.target.closest('.tree-toggle')) return toggleTree(node);
+  if (node.dataset.kind === 'tree-root') return chrome.tabs.update(tabId, { active: true });
+  if (e.target.closest('.close')) return send('closeTabs', { windowId, tabIds: [tabId] });
+  if (e.target.closest('.audio')) return toggleMute(tabs.find(t => t.id === tabId));
+  chrome.tabs.update(tabId, { active: true });
 }
 
 function setAudio(node, tab) {
@@ -339,7 +392,7 @@ $('#reload').onclick = () => withActive(t => chrome.tabs.reload(t.id));
 const urlInput = $('#url');
 urlInput.addEventListener('focus', () => {
   const url = tabUrl(activeTab());
-  urlInput.value = url.startsWith('chrome://newtab') ? '' : url;
+  urlInput.value = isNewTabUrl(url, chrome.runtime.getURL('')) ? '' : url;
   setTimeout(() => urlInput.select());
 });
 urlInput.addEventListener('blur', renderToolbar);
@@ -386,6 +439,8 @@ $('#essentials').addEventListener('auxclick', e => {
 $('#pins').addEventListener('click', e => {
   const node = e.target.closest('.row');
   if (!node || node.dataset.editing) return;
+  if (node.dataset.kind === 'tab') return ordinaryTabClick(e, node);
+  if (e.target.closest('.tree-toggle')) return toggleTree(node);
   const pinId = node.dataset.id;
   if (e.target.closest('.close')) return send('unloadPin', { windowId, pinId });
   if (e.target.closest('.audio')) return toggleMute(boundTabOf(pinId));
@@ -395,21 +450,21 @@ $('#pins').addEventListener('click', e => {
 
 $('#pins').addEventListener('auxclick', e => {
   const node = e.target.closest('.row');
-  if (node && e.button === 1) send('unloadPin', { windowId, pinId: node.dataset.id });
+  if (node && e.button === 1) {
+    if (node.dataset.kind === 'tab') send('closeTabs', { windowId, tabIds: [+node.dataset.id] });
+    else send('unloadPin', { windowId, pinId: node.dataset.id });
+  }
 });
 
 $('#tabs').addEventListener('click', e => {
   const node = e.target.closest('.row');
   if (!node) return;
-  const tabId = +node.dataset.id;
-  if (e.target.closest('.close')) return send('closeTabs', { windowId, tabIds: [tabId] });
-  if (e.target.closest('.audio')) return toggleMute(tabs.find(t => t.id === tabId));
-  chrome.tabs.update(tabId, { active: true });
+  ordinaryTabClick(e, node);
 });
 
 $('#tabs').addEventListener('auxclick', e => {
   const node = e.target.closest('.row');
-  if (node && e.button === 1) send('closeTabs', { windowId, tabIds: [+node.dataset.id] });
+  if (node && node.dataset.kind !== 'tree-root' && e.button === 1) send('closeTabs', { windowId, tabIds: [+node.dataset.id] });
 });
 
 $('#new-tab').onclick = () => send('newTab', { windowId, spaceId: activeSpaceId() });
@@ -423,14 +478,14 @@ $('#spaces').addEventListener('click', e => {
   if (btn) send('switchSpace', { windowId, spaceId: btn.dataset.spaceId });
 });
 
-// Horizontal trackpad swipe switches spaces.
+// Horizontal trackpad swipe switches spaces, like Zen.
 let swipeAccum = 0;
 let swipeLocked = false;
 let swipeUnlockTimer = null;
 document.addEventListener(
   'wheel',
   e => {
-    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || e.target.closest('#menu, #popover, #spaces')) return;
+    if (Math.abs(e.deltaX) <= Math.abs(e.deltaY) || e.target.closest('#menu, #popover, #spaces, dialog')) return;
     clearTimeout(swipeUnlockTimer);
     swipeUnlockTimer = setTimeout(() => {
       swipeLocked = false;
@@ -456,8 +511,11 @@ document.addEventListener('contextmenu', e => {
   const spaceBtn = e.target.closest('.space-btn');
   if (spaceBtn) return openMenu(e, spaceMenu(spaceBtn.dataset.spaceId));
   if (e.target.closest('#space-header')) return openMenu(e, spaceMenu(activeSpaceId()));
+  const folder = e.target.closest('[data-folder]');
+  if (folder) return openMenu(e, organizer.folderMenu(folder.dataset.folder));
   const node = e.target.closest('[data-kind]');
   if (!node) return;
+  if (node.dataset.kind === 'tree-root') return openMenu(e, tabTreeItems(+node.dataset.id));
   if (node.dataset.kind === 'tab') openMenu(e, tabMenu(+node.dataset.id));
   else openMenu(e, pinMenu(node.dataset.id, node));
 });
@@ -468,14 +526,27 @@ function moveToSpaceItems(run, excludeId) {
   return ['-', { label: 'Move to space' }, ...others.map(s => ({ space: s, label: s.name, run: () => run(s.id) }))];
 }
 
+function tabTreeItems(tabId) {
+  const tree = buildTabTree(tabs, rt, activeSpaceId());
+  const count = tree.info(tabId).childCount;
+  return [
+    { icon: 'plus', label: 'New child tab', run: () => send('newChildTab', { tabId }) },
+    count && { label: tree.info(tabId).collapsed ? 'Expand child tabs' : 'Collapse child tabs', run: () => send('toggleTabTree', { windowId, tabId, spaceId: activeSpaceId() }) },
+    rt.tabParent?.[tabId] != null && { label: 'Move out of parent tab', run: () => send('setTabParent', { tabId, parentId: null }) },
+  ].filter(Boolean);
+}
+
 function tabMenu(tabId) {
   const tab = tabs.find(t => t.id === tabId);
   if (!tab) return [];
   const spaceId = activeSpaceId();
   const muted = !!tab.mutedInfo?.muted;
   return [
+    ...tabTreeItems(tabId),
+    '-',
     { icon: 'pin', label: 'Pin tab', run: () => send('pinTab', { tabId, spaceId }) },
     { icon: 'star', label: 'Add to Essentials', run: () => send('pinTab', { tabId, spaceId: null }) },
+    ...organizer.pinFolderItems(tabId, null, spaceId),
     ...moveToSpaceItems(id => send('moveTab', { tabId, spaceId: id }), spaceId),
     '-',
     { icon: 'link', label: 'Copy link', run: () => navigator.clipboard.writeText(tabUrl(tab)) },
@@ -500,6 +571,7 @@ function pinMenu(pinId, node) {
       label: 'Rename…',
       run: () => (essential ? renamePinPopover(node, pin) : renamePinInline(node, pin)),
     },
+    ...(tab ? tabTreeItems(tab.id).filter(item => item.label !== 'Move out of parent tab') : []),
     { icon: 'link', label: 'Edit pinned URL…', run: () => editPinUrl(node, pin) },
     drifted && '-',
     drifted && { icon: 'rotateCcw', label: 'Go back to pinned URL', run: () => send('resetPin', { windowId, pinId }) },
@@ -512,6 +584,7 @@ function pinMenu(pinId, node) {
     essential
       ? { icon: 'pin', label: 'Move to pinned tabs', run: () => send('movePin', { pinId, spaceId }) }
       : { icon: 'star', label: 'Add to Essentials', run: () => send('movePin', { pinId, spaceId: null }) },
+    ...organizer.pinFolderItems(null, pinId, essential ? spaceId : pin.spaceId),
     ...(essential ? [] : moveToSpaceItems(id => send('movePin', { pinId, spaceId: id }), pin.spaceId)),
     '-',
     { icon: 'copy', label: 'Copy pinned URL', run: () => navigator.clipboard.writeText(pin.url) },
@@ -543,6 +616,7 @@ function spaceMenu(spaceId) {
   return [
     { icon: 'pencil', label: 'Edit space…', run: () => openSpaceEditor(lastMenuPoint, space) },
     { icon: 'plus', label: 'New space…', run: () => openSpaceEditor(lastMenuPoint, null) },
+    { icon: 'plus', label: 'New folder…', run: () => organizer.newFolder(spaceId) },
     '-',
     i > 0 && { icon: 'chevronLeft', label: 'Move left', run: () => move(-1) },
     i < config.spaces.length - 1 && { icon: 'chevronRight', label: 'Move right', run: () => move(1) },
@@ -686,7 +760,7 @@ function renameSpaceInline() {
 
 function openPopover(point, build) {
   closeMenu();
-  // Start from a fresh element so listeners from a previous popover can't fire again.
+  // Fresh elements discard handlers from the previous popover (upstream fix).
   const pop = $('#popover').cloneNode(false);
   $('#popover').replaceWith(pop);
   build(pop);
@@ -780,7 +854,7 @@ function openSpaceEditor(point, space) {
       if (space) send('updateSpace', { spaceId: space.id, ...payload });
       else send('createSpace', { windowId, ...payload });
     };
-    for (const input of [nameInput, iconInput]) input.addEventListener('keydown', e => e.key === 'Enter' && save());
+    pop.addEventListener('keydown', e => e.key === 'Enter' && save());
     pop.querySelector('[data-act=save]').onclick = save;
     pop.querySelector('[data-act=cancel]').onclick = closePopover;
   });
@@ -809,7 +883,6 @@ function openSettings(e) {
       <label class="toggle"><span>Collapse other spaces in the tab strip<small>Only the current space's tab group stays expanded.</small></span><input type="checkbox" name="collapseInactive"></label>
       <label class="toggle"><span>Click an active pinned tab to reset it<small>Sends it back to its pinned URL after you've navigated away.</small></span><input type="checkbox" name="resetOnReclick"></label>
       <label class="toggle"><span>Option-click a link to Peek<small>Opens it in a floating window. Esc closes it, ⌘↩ keeps it as a tab.</small></span><input type="checkbox" name="peekOnAltClick"></label>
-      <label class="toggle"><span>Open links from Essentials in Peek<small>Your Essential stays put behind the Peek.</small></span><input type="checkbox" name="peekFromEssentials"></label>
       <label class="toggle"><span>Open Peek in split view<small>Beside the current tab instead of a floating window. Full screen always uses split view.</small></span><input type="checkbox" name="peekInSplitView"></label>
       <div class="links"><a data-act="export">Export setup…</a><a data-act="import">Import setup…</a><a data-act="shortcuts">Keyboard shortcuts…</a></div>`;
     for (const input of pop.querySelectorAll('input[type=checkbox]')) {
@@ -818,10 +891,7 @@ function openSettings(e) {
     }
     pop.querySelector('[data-act=shortcuts]').onclick = () => chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
     pop.querySelector('[data-act=export]').onclick = exportSetup;
-    pop.querySelector('[data-act=import]').onclick = () => {
-      closePopover();
-      importPicker.click();
-    };
+    pop.querySelector('[data-act=import]').onclick = () => { closePopover(); importPicker.click(); };
   });
 }
 
@@ -881,8 +951,8 @@ importPicker.addEventListener('change', async () => {
 const zones = [$('#essentials'), $('#pins'), $('#tabs')];
 
 function clearIndicators() {
-  document.querySelectorAll('.drop-before, .drop-end, .drop-target').forEach(n => {
-    n.classList.remove('drop-before', 'drop-end', 'drop-target');
+  document.querySelectorAll('.drop-before, .drop-end, .drop-target, .drop-into-tree').forEach(n => {
+    n.classList.remove('drop-before', 'drop-end', 'drop-target', 'drop-into-tree');
   });
 }
 
@@ -912,22 +982,40 @@ function dropPosition(zone, e) {
 
 document.addEventListener('dragstart', e => {
   const node = e.target.closest?.('[data-kind]');
-  if (!node || node.dataset.editing) return;
+  if (!node || node.dataset.editing || !['tab', 'pin'].includes(node.dataset.kind)) return;
   drag = { kind: node.dataset.kind, id: node.dataset.kind === 'tab' ? +node.dataset.id : node.dataset.id, node };
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', '');
   requestAnimationFrame(() => {
+    if (drag?.node !== node) return;
     node.classList.add('dragging-el');
     document.body.classList.add('dragging');
   });
 });
 document.addEventListener('dragend', endDrag);
 
+function treeDropTarget(zone, e) {
+  if (drag?.kind !== 'tab') return null;
+  const row = e.target.closest('.row[data-tree-tab-id]');
+  if (!row || !zone.contains(row) || +row.dataset.treeTabId === drag.id) return null;
+  const rect = row.getBoundingClientRect();
+  if (e.clientX < rect.left + 40 || e.clientY < rect.top + rect.height * .25 || e.clientY > rect.bottom - rect.height * .25) return null;
+  return row;
+}
+
 for (const zone of zones) {
   zone.addEventListener('dragover', e => {
     if (!drag) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
+    const treeTarget = treeDropTarget(zone, e);
+    if (treeTarget) { clearIndicators(); treeTarget.classList.add('drop-into-tree'); return; }
+    const folder = e.target.closest('[data-folder]');
+    if (folder && zone.id === 'pins') {
+      clearIndicators();
+      folder.classList.add('drop-target');
+      return;
+    }
     const { beforeNode } = dropPosition(zone, e);
     clearIndicators();
     if (beforeNode) beforeNode.classList.add('drop-before');
@@ -944,18 +1032,27 @@ for (const zone of zones) {
 }
 
 function handleDrop(zone, e) {
+  const parent = treeDropTarget(zone, e);
+  if (parent) { send('setTabParent', { tabId: drag.id, parentId: +parent.dataset.treeTabId }).catch(error => showToast(error.message)); return; }
   const { index, beforeNode } = dropPosition(zone, e);
   const spaceId = activeSpaceId();
   const { kind, id } = drag;
   if (zone.id === 'tabs') {
     const beforeTabId = beforeNode ? +beforeNode.dataset.id : null;
-    if (kind === 'tab') send('moveTab', { tabId: id, spaceId, beforeTabId });
+    if (kind === 'tab') send('setTabParent', { tabId: id, parentId: beforeNode?.dataset.treeParentId ? +beforeNode.dataset.treeParentId : null, beforeTabId });
     else send('unpin', { pinId: id, windowId, spaceId, beforeTabId, place: true });
     return;
   }
   const target = zone.id === 'essentials' ? null : spaceId;
-  if (kind === 'tab') send('pinTab', { tabId: id, spaceId: target, index });
-  else send('movePin', { pinId: id, spaceId: target, index });
+  const header = e.target.closest('[data-folder]');
+  const folderId = target == null ? null : (header?.dataset.folder || beforeNode?.dataset.folderId || null);
+  let actualIndex = target == null ? index : beforeNode ? config.spaces.find(s => s.id === target).pins.indexOf(beforeNode.dataset.id) : undefined;
+  if (kind === 'pin' && target != null && beforeNode) {
+    const oldIndex = config.spaces.find(s => s.id === target).pins.indexOf(id);
+    if (oldIndex !== -1 && oldIndex < actualIndex) actualIndex--;
+  }
+  if (kind === 'tab') send('pinTab', { tabId: id, spaceId: target, index: actualIndex, folderId });
+  else send('movePin', { pinId: id, spaceId: target, index: actualIndex, folderId });
 }
 
 $('#spaces').addEventListener('dragover', e => {
@@ -980,17 +1077,19 @@ $('#spaces').addEventListener('drop', e => {
 // Boot
 
 let toastTimer;
-function showToast(text) {
-  const toast = $('#toast');
-  toast.textContent = text;
-  toast.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
-}
 const SERVICE_WORKER = chrome.runtime.getURL('src/background.js');
+function showToast(text) {
+  const toast = $('#toast'); toast.textContent = text; toast.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
+}
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (sender.url !== SERVICE_WORKER) return;
-  if (msg?.target === 'panel' && msg.type === 'toast' && msg.windowId === windowId) showToast(msg.text);
+  if (msg?.target !== 'panel' || msg.type !== 'toast' || msg.windowId !== windowId) return;
+  const toast = $('#toast');
+  toast.textContent = msg.text;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 1600);
 });
 
 chrome.storage.onChanged.addListener(schedule);
@@ -1011,5 +1110,15 @@ async function loadShortcuts() {
 window.addEventListener('focus', loadShortcuts);
 
 windowId = (await chrome.windows.getCurrent()).id;
+organizer = createOrganizer({
+  state: () => ({ config, rt, tabs, windowId, spaceId: config ? activeSpaceId() : null }),
+  send, syncList, createRow, updatePinRow, updateTabRow, decorateTreeRow, svg, openMenu, promptPopover,
+  point: () => lastMenuPoint,
+});
 await refresh();
 await loadShortcuts();
+
+window.addEventListener('unhandledrejection', e => {
+  e.preventDefault();
+  organizer.error(e.reason?.message || 'The action could not be completed.');
+});

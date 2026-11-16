@@ -27,6 +27,9 @@
     await send('pinTab', { tabId: prs.id, spaceId: main });
     const prsPin = (await cfg()).spaces[0].pins[0];
     await send('renamePin', { pinId: prsPin, title: 'Team PRs' });
+    const folder = await send('createFolder', { spaceId: main, name: 'Projects' });
+    const child = await send('createFolder', { spaceId: main, parentId: folder, name: 'Reviews' });
+    await send('movePin', { pinId: prsPin, spaceId: main, folderId: child });
     await chrome.tabs.update(prs.id, { url: B + '/prs/123' }); // drifted
     const mail = await open(W, '/mail');
     await send('pinTab', { tabId: mail.id, spaceId: null });
@@ -42,6 +45,7 @@
     payload = await send('exportConfig');
     ok(payload.format === 'cove-setup' && payload.config.spaces.length === 2 && payload.config.essentials.length === 2,
       'export contains 2 spaces and 2 Essentials');
+    ok(Object.keys(payload.config.folders).length === 2 && payload.config.pins[prsPin].folderId === child, 'export includes nested folders and pin membership');
     ok(JSON.stringify(payload).length < 50000, 'export is small: ' + JSON.stringify(payload).length + ' bytes');
     await chrome.storage.local.clear();
   } catch (e) {

@@ -7,11 +7,11 @@
   await sleep(500);
   const c = (await chrome.storage.local.get('config')).config;
   await send('updateSpace', { spaceId: c.spaces[0].id, name: 'Main', icon: '' });
-  for (const p of ['/gmail', '/calendar', '/slack', '/github', '/devops', '/docs-e']) { const t = await mk(p); await sleep(300); await send('pinTab', { tabId: t.id, spaceId: null }); }
+  for (const p of ['/gmail', '/calendar', '/slack', '/github']) { const t = await mk(p); await sleep(300); await send('pinTab', { tabId: t.id, spaceId: null }); }
   const pr = await mk('/prs'); await sleep(300);
   await send('pinTab', { tabId: pr.id, spaceId: c.spaces[0].id });
   const pid = (await chrome.storage.local.get('config')).config.spaces[0].pins[0];
-  await send('renamePin', { pinId: pid, title: 'Team PRs' });
+  await send('renamePin', { pinId: pid, title: 'All RH PRs' });
   await chrome.tabs.update(pr.id, { url: B + '/prs/12345' });
   const lucide = await mk('/lucide'); await sleep(300);
   await send('pinTab', { tabId: lucide.id, spaceId: c.spaces[0].id });

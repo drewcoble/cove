@@ -103,8 +103,16 @@
     await sleep(1200);
     await chrome.tabs.update(p1.id, { active: true });
     await sleep(400);
-    const panelW = chrome.extension.getViews({ type: 'tab', windowId: W })[0];
-    const row = panelW?.document.querySelector(`#pins [data-id="${pinId}"]`);
+    // New Tab is also an extension view; select the sidebar by URL rather than
+    // relying on the unspecified ordering of getViews().
+    let row;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const panelW = chrome.extension.getViews({ type: 'tab', windowId: W })
+        .find(view => view.location.pathname === '/src/sidepanel.html');
+      row = panelW?.document.querySelector(`#pins [data-id="${pinId}"]`);
+      if (row?.querySelector('.title').textContent === 'My Name' && row.classList.contains('drifted')) break;
+      await sleep(50);
+    }
     ok(row?.querySelector('.title').textContent === 'My Name',
       'custom name still shown after navigating away: ' + row?.querySelector('.title').textContent);
     ok(row?.classList.contains('drifted'), 'pinned row shows the "/" drifted state');
@@ -249,28 +257,29 @@
       'peeking from inside a peek replaces it (no stacking)');
     await send('peekClose', { windowId: peek4 });
 
-    // A tab Chrome attributes to the Essential that its page didn't open itself (e.g. a link
-    // arriving from Slack while the Essential is active) stays a normal tab. Tabs the page does
-    // open (target=_blank) are covered with real clicks in peek-input.mjs.
+    // Links opened from an Essential are ordinary tabs in the current space.
     const essTab = await chrome.tabs.create({ windowId: W, url: B + '/inbox' });
     await waitLoad(essTab.id);
     await send('pinTab', { tabId: essTab.id, spaceId: null });
     await chrome.tabs.update(essTab.id, { active: true });
     await sleep(300);
+    const essentialSpace = (await rt()).activeSpace[W];
     const spawned = await chrome.tabs.create({ windowId: W, url: B + '/from-slack', openerTabId: essTab.id, active: true });
-    await sleep(1200);
+    await sleep(800);
     r = await rt();
-    ok(!!(await chrome.tabs.get(spawned.id).catch(() => null)) && !Object.keys(r.peeks).length && r.tabSpace[spawned.id],
-      'a link arriving from another app while an Essential is active opens as a normal tab in a space');
+    ok(!!(await chrome.tabs.get(spawned.id).catch(() => null)) && r.tabSpace[spawned.id] === essentialSpace,
+      'link arriving from another app while an Essential is active stays open in the current space');
+    ok(!Object.keys(r.peeks).length && !r.tabPeeks[spawned.id], 'ordinary Essential links do not create Peek');
+    ok((await chrome.tabs.get(essTab.id)).url === B + '/inbox', 'the Essential retains its original page');
     const bg = await chrome.tabs.create({ windowId: W, url: B + '/bg', openerTabId: essTab.id, active: false });
-    await sleep(800);
-    ok(!!(await chrome.tabs.get(bg.id).catch(() => null)) && !Object.keys((await rt()).peeks).length,
-      '⌘-click style background tab from an Essential stays a normal tab');
-    await send('updateSettings', { patch: { peekFromEssentials: false } });
-    const off = await chrome.tabs.create({ windowId: W, url: B + '/off', openerTabId: essTab.id, active: true });
-    await sleep(800);
-    ok(!!(await chrome.tabs.get(off.id).catch(() => null)), 'setting off: links from Essentials open as tabs');
+    await sleep(500);
+    ok((await rt()).tabSpace[bg.id] === essentialSpace && (await active(W)).id === spawned.id,
+      'background link from an Essential joins the current space without stealing focus');
     await send('updateSettings', { patch: { peekFromEssentials: true } });
+    const off = await chrome.tabs.create({ windowId: W, url: B + '/off', openerTabId: essTab.id, active: true });
+    await sleep(500);
+    ok(!!(await chrome.tabs.get(off.id).catch(() => null)) && !(await cfg()).settings.peekFromEssentials,
+      'retired automatic Peek preference cannot re-enable lost-link behavior');
 
     // ---- Full screen: Peek opens in a split view beside the tab you came from
     await chrome.windows.update(W, { state: 'fullscreen' });
@@ -312,17 +321,15 @@
 
     await chrome.tabs.update(essTab.id, { active: true });
     await sleep(300);
-    const fsSlack = await chrome.tabs.create({ windowId: W, url: B + '/fs-slack', openerTabId: essTab.id, active: true });
-    await sleep(1200);
-    const fsSlackTab = await chrome.tabs.get(fsSlack.id).catch(() => null);
+    const fsSpawn = await chrome.tabs.create({ windowId: W, url: B + '/fs-slack', openerTabId: essTab.id, active: true });
+    await sleep(1500);
     r = await rt();
-    ok(!!fsSlackTab && fsSlackTab.splitViewId === NONE && !Object.keys(r.tabPeeks).length,
-      'full screen: a link arriving from another app opens as a normal tab, not a split Peek');
+    ok((await chrome.tabs.get(fsSpawn.id)).url === B + '/fs-slack' && r.tabSpace[fsSpawn.id] === r.activeSpace[W] && !r.tabPeeks[fsSpawn.id],
+      'full screen: links from other apps remain regular tabs in the current space');
     await chrome.tabs.update(essTab.id, { active: true });
-    await sleep(300);
-    const spawnId = await send('peek', { url: B + '/fs-email', windowId: W });
-    await sleep(1000);
-    const spawnTab = await chrome.tabs.get(spawnId);
+    const explicitPeek = await send('peek', { url: B + '/explicit-split', windowId: W });
+    await sleep(800);
+    const spawnTab = await chrome.tabs.get(explicitPeek);
     await chrome.tabs.unsplit(spawnTab.splitViewId);
     await sleep(800);
     r = await rt();
