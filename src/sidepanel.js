@@ -30,6 +30,16 @@ const ICONS = {
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
   chevronLeft: '<path d="m15 18-6-6 6-6"/>',
   chevronRight: '<path d="m9 18 6-6-6-6"/>',
+  folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  folderPlus:
+    '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6"/><path d="M9 13h6"/>',
+  folderMinus:
+    '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M9 13h6"/>',
+  folderOpen:
+    '<path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/>',
+  cornerUpLeft: '<path d="M20 20v-7a4 4 0 0 0-4-4H4"/><path d="M9 14 4 9l5-5"/>',
+  search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  archive: '<rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/>',
 };
 
 const svg = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
@@ -167,10 +177,10 @@ function render() {
   renderHeader(space);
   syncList(
     $('#pins'),
-    space.pins.filter(id => config.pins[id]).map(withTab),
-    x => 'p' + x.pin.id,
-    createRow,
-    updatePinRow,
+    pinTree(space, withTab),
+    x => (x.folder ? 'f' + x.folder.id : 'p' + x.pin.id),
+    x => (x.folder ? createFolderRow() : createRow()),
+    (node, x) => (x.folder ? updateFolderRow(node, x) : updateNestedPinRow(node, x)),
   );
   syncList(
     $('#tabs'),
@@ -237,6 +247,79 @@ function updateEssential(node, { pin, tab }) {
   node.classList.toggle('drifted', drifted);
   node.title = pinTitle(pin, drifted ? null : tab) + (drifted ? `\nNow: ${tab.title || tabUrl(tab)}\nClick again to go back` : '');
   setImg(node.querySelector('img'), faviconFor(drifted ? null : tab, pin));
+}
+
+// ---------------------------------------------------------------------------------------
+// Folders in the pinned list: at each level, that level's pins (in the space's pin order)
+// come first, then its subfolders. Collapsed folders hide everything inside them.
+
+const spaceFolders = spaceId => Object.values(config.folders ?? {}).filter(f => f.spaceId === spaceId);
+
+function folderPathText(folderId) {
+  const names = [];
+  const seen = new Set();
+  for (let f = config.folders?.[folderId]; f && !seen.has(f.id); f = config.folders[f.parentId]) {
+    seen.add(f.id);
+    names.unshift(f.name);
+  }
+  return names.join(' / ');
+}
+
+// The folder and everything nested inside it.
+function folderSubtree(folderId) {
+  const ids = new Set([folderId]);
+  let size;
+  do {
+    size = ids.size;
+    for (const f of Object.values(config.folders ?? {})) if (ids.has(f.parentId)) ids.add(f.id);
+  } while (ids.size !== size);
+  return ids;
+}
+
+function pinTree(space, withTab) {
+  const folders = spaceFolders(space.id);
+  const pins = space.pins.filter(id => config.pins[id]).map(withTab);
+  const items = [];
+  const placed = new Set();
+  const visit = (parentId, depth) => {
+    for (const x of pins) if ((x.pin.folderId ?? null) === parentId) items.push({ ...x, depth });
+    for (const folder of folders) {
+      if ((folder.parentId ?? null) !== parentId || placed.has(folder.id)) continue;
+      placed.add(folder.id);
+      const inside = folderSubtree(folder.id);
+      const contents = pins.filter(x => inside.has(x.pin.folderId));
+      items.push({ folder, depth, count: contents.length, holdsActive: contents.some(x => x.tab?.active) });
+      if (!folder.collapsed) visit(folder.id, depth + 1);
+    }
+  };
+  visit(null, 0);
+  return items;
+}
+
+function createFolderRow() {
+  const node = document.createElement('div');
+  node.className = 'row folder-row';
+  node.innerHTML = `<span class="fav chevron">${svg('chevronRight')}</span><span class="fav">${svg('folder')}</span><span class="title"></span><span class="count"></span>`;
+  return node;
+}
+
+function updateFolderRow(node, { folder, depth, count, holdsActive }) {
+  node.dataset.kind = 'folder';
+  node.dataset.id = folder.id;
+  node.style.setProperty('--depth', depth);
+  node.classList.toggle('collapsed', !!folder.collapsed);
+  // A collapsed folder that hides the active tab is tinted, so you can still find it.
+  node.classList.toggle('holds-active', !!folder.collapsed && holdsActive);
+  node.setAttribute('aria-expanded', String(!folder.collapsed));
+  setText(node.querySelector('.title'), folder.name);
+  setText(node.querySelector('.count'), String(count));
+  node.title = `${folderPathText(folder.id)} · ${count} pinned tab${count === 1 ? '' : 's'}`;
+}
+
+function updateNestedPinRow(node, x) {
+  updatePinRow(node, x);
+  node.style.setProperty('--depth', x.depth);
+  node.dataset.folderId = x.pin.folderId ?? '';
 }
 
 function createRow() {
@@ -318,6 +401,8 @@ function updateSpaceButton(node, space, active) {
 // ---------------------------------------------------------------------------------------
 // Toolbar
 
+$('#search-btn').innerHTML = svg('search');
+$('#archive-btn').innerHTML = svg('archive');
 $('#back').innerHTML = svg('arrowLeft');
 $('#forward').innerHTML = svg('arrowRight');
 $('#reload').innerHTML = svg('rotateCw');
@@ -384,6 +469,11 @@ $('#essentials').addEventListener('auxclick', e => {
 });
 
 $('#pins').addEventListener('click', e => {
+  const folderRow = e.target.closest('.folder-row');
+  if (folderRow) {
+    const folder = config.folders[folderRow.dataset.id];
+    return folder && act('updateFolder', { folderId: folder.id, collapsed: !folder.collapsed });
+  }
   const node = e.target.closest('.row');
   if (!node || node.dataset.editing) return;
   const pinId = node.dataset.id;
@@ -394,7 +484,7 @@ $('#pins').addEventListener('click', e => {
 });
 
 $('#pins').addEventListener('auxclick', e => {
-  const node = e.target.closest('.row');
+  const node = e.target.closest('.row:not(.folder-row)');
   if (node && e.button === 1) send('unloadPin', { windowId, pinId: node.dataset.id });
 });
 
@@ -417,6 +507,8 @@ $('#clear').onclick = () => send('clearSpace', { windowId, spaceId: activeSpaceI
 $('#space-name').addEventListener('dblclick', () => renameSpaceInline());
 $('#space-menu').onclick = e => openMenu(e, spaceMenu(activeSpaceId()));
 $('#settings').onclick = e => openSettings(e);
+$('#search-btn').onclick = () => send('openSearch', { windowId });
+$('#archive-btn').onclick = () => send('openSearch', { windowId, mode: 'archive' });
 $('#add-space').onclick = e => openSpaceEditor(e, null);
 $('#spaces').addEventListener('click', e => {
   const btn = e.target.closest('.space-btn');
@@ -459,6 +551,7 @@ document.addEventListener('contextmenu', e => {
   const node = e.target.closest('[data-kind]');
   if (!node) return;
   if (node.dataset.kind === 'tab') openMenu(e, tabMenu(+node.dataset.id));
+  else if (node.dataset.kind === 'folder') openMenu(e, folderMenu(node.dataset.id, node));
   else openMenu(e, pinMenu(node.dataset.id, node));
 });
 
@@ -466,6 +559,54 @@ function moveToSpaceItems(run, excludeId) {
   const others = config.spaces.filter(s => s.id !== excludeId);
   if (!others.length) return [];
   return ['-', { label: 'Move to space' }, ...others.map(s => ({ space: s, label: s.name, run: () => run(s.id) }))];
+}
+
+// "Move to folder" entries for a pin (or "Pin to folder" for a tab) within one space.
+function folderItems(spaceId, currentFolderId, run, verb = 'Move') {
+  const folders = spaceFolders(spaceId).filter(f => f.id !== currentFolderId);
+  if (!folders.length && !currentFolderId) return [];
+  return [
+    '-',
+    folders.length && { label: `${verb} to folder` },
+    ...folders.map(f => ({ icon: 'folder', label: folderPathText(f.id), run: () => run(f.id) })),
+    currentFolderId && { icon: 'cornerUpLeft', label: 'Move out of folder', run: () => run(null) },
+  ];
+}
+
+function newFolder(spaceId, parentId, point = lastMenuPoint) {
+  promptPopover(point, {
+    title: parentId ? `New folder in ${folderPathText(parentId)}` : 'New folder',
+    placeholder: 'Folder name',
+    confirm: 'Create',
+    onSave: name => act('createFolder', { spaceId, parentId, name }),
+  });
+}
+
+function folderMenu(folderId, node) {
+  const folder = config.folders?.[folderId];
+  if (!folder) return [];
+  const inside = folderSubtree(folderId);
+  const targets = spaceFolders(folder.spaceId).filter(f => !inside.has(f.id) && f.id !== folder.parentId);
+  return [
+    {
+      icon: 'pencil',
+      label: 'Rename folder…',
+      run: () =>
+        promptPopover(anchorPoint(node), {
+          title: 'Rename folder',
+          value: folder.name,
+          onSave: name => act('updateFolder', { folderId, name }),
+        }),
+    },
+    { icon: 'folderPlus', label: 'New subfolder…', run: () => newFolder(folder.spaceId, folderId, anchorPoint(node)) },
+    { icon: 'folderOpen', label: 'Open all tabs', run: () => act('openFolder', { windowId, folderId }) },
+    '-',
+    folder.parentId && { icon: 'cornerUpLeft', label: 'Move to top level', run: () => act('updateFolder', { folderId, parentId: null }) },
+    targets.length && { label: 'Move into folder' },
+    ...targets.map(f => ({ icon: 'folder', label: folderPathText(f.id), run: () => act('updateFolder', { folderId, parentId: f.id }) })),
+    '-',
+    { icon: 'folderMinus', label: 'Remove folder (keep tabs)', run: () => act('deleteFolder', { folderId }) },
+  ];
 }
 
 function tabMenu(tabId) {
@@ -476,6 +617,7 @@ function tabMenu(tabId) {
   return [
     { icon: 'pin', label: 'Pin tab', run: () => send('pinTab', { tabId, spaceId }) },
     { icon: 'star', label: 'Add to Essentials', run: () => send('pinTab', { tabId, spaceId: null }) },
+    ...folderItems(spaceId, null, folderId => act('pinTab', { tabId, spaceId, folderId }), 'Pin'),
     ...moveToSpaceItems(id => send('moveTab', { tabId, spaceId: id }), spaceId),
     '-',
     { icon: 'link', label: 'Copy link', run: () => navigator.clipboard.writeText(tabUrl(tab)) },
@@ -512,6 +654,11 @@ function pinMenu(pinId, node) {
     essential
       ? { icon: 'pin', label: 'Move to pinned tabs', run: () => send('movePin', { pinId, spaceId }) }
       : { icon: 'star', label: 'Add to Essentials', run: () => send('movePin', { pinId, spaceId: null }) },
+    ...(essential
+      ? []
+      : folderItems(pin.spaceId, pin.folderId, folderId =>
+          act('movePin', { pinId, spaceId: pin.spaceId, index: spacePins(pin.spaceId).indexOf(pinId), folderId }),
+        )),
     ...(essential ? [] : moveToSpaceItems(id => send('movePin', { pinId, spaceId: id }), pin.spaceId)),
     '-',
     { icon: 'copy', label: 'Copy pinned URL', run: () => navigator.clipboard.writeText(pin.url) },
@@ -543,6 +690,7 @@ function spaceMenu(spaceId) {
   return [
     { icon: 'pencil', label: 'Edit space…', run: () => openSpaceEditor(lastMenuPoint, space) },
     { icon: 'plus', label: 'New space…', run: () => openSpaceEditor(lastMenuPoint, null) },
+    { icon: 'folderPlus', label: 'New folder…', run: () => newFolder(spaceId, null) },
     '-',
     i > 0 && { icon: 'chevronLeft', label: 'Move left', run: () => move(-1) },
     i < config.spaces.length - 1 && { icon: 'chevronRight', label: 'Move right', run: () => move(1) },
@@ -811,13 +959,24 @@ function openSettings(e) {
       <label class="toggle"><span>Option-click a link to Peek<small>Opens it in a floating window. Esc closes it, ⌘↩ keeps it as a tab.</small></span><input type="checkbox" name="peekOnAltClick"></label>
       <label class="toggle"><span>Open links from Essentials in Peek<small>Your Essential stays put behind the Peek.</small></span><input type="checkbox" name="peekFromEssentials"></label>
       <label class="toggle"><span>Open Peek in split view<small>Beside the current tab instead of a floating window. Full screen always uses split view.</small></span><input type="checkbox" name="peekInSplitView"></label>
-      <div class="links"><a data-act="export">Export setup…</a><a data-act="import">Import setup…</a><a data-act="shortcuts">Keyboard shortcuts…</a></div>`;
+      <label class="toggle"><span>Use browsing history in search<small>Search also finds pages you visited in the last 90 days and remembers what you pick.</small></span><input type="checkbox" name="searchHistory"></label>
+      <label class="toggle"><span>Keep closed tabs in the archive<small>The last 500 closed tabs, kept on this computer. Undo reopens the last close.</small></span><input type="checkbox" name="archiveClosedTabs"></label>
+      <div class="links"><a data-act="export">Export setup…</a><a data-act="import">Import setup…</a><a data-act="shortcuts">Keyboard shortcuts…</a></div>
+      <div class="links"><a data-act="clear-archive">Clear archive</a><a data-act="clear-memory">Forget remembered searches</a></div>`;
     for (const input of pop.querySelectorAll('input[type=checkbox]')) {
       input.checked = !!config.settings[input.name];
       input.onchange = () => send('updateSettings', { patch: { [input.name]: input.checked } });
     }
     pop.querySelector('[data-act=shortcuts]').onclick = () => chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
     pop.querySelector('[data-act=export]').onclick = exportSetup;
+    pop.querySelector('[data-act=clear-archive]').onclick = async () => {
+      await act('clearArchive');
+      showToast('Archive cleared');
+    };
+    pop.querySelector('[data-act=clear-memory]').onclick = async () => {
+      await act('clearSearchMemory');
+      showToast('Remembered searches cleared');
+    };
     pop.querySelector('[data-act=import]').onclick = () => {
       closePopover();
       importPicker.click();
@@ -874,6 +1033,7 @@ importPicker.addEventListener('change', async () => {
 // Drag & drop
 //   tab   -> Essentials / pinned list    : pin it there
 //   pin   -> Essentials / pinned list    : move / reorder the pin
+//   tab/pin -> middle of a folder row     : into that folder (pinning a tab)
 //   tab   -> tab list                    : reorder (moves the Chrome tab)
 //   pin   -> tab list                    : unpin, keep the tab where it was dropped
 //   either -> space button               : move to that space
@@ -895,6 +1055,15 @@ function endDrag() {
     renderDeferred = false;
     schedule();
   }
+}
+
+// Hovering the middle of a folder row targets the folder itself rather than a gap.
+function folderTarget(zone, e) {
+  if (zone.id !== 'pins') return null;
+  const row = e.target.closest?.('.folder-row');
+  if (!row) return null;
+  const r = row.getBoundingClientRect();
+  return e.clientY > r.top + r.height * 0.25 && e.clientY < r.bottom - r.height * 0.25 ? row : null;
 }
 
 function dropPosition(zone, e) {
@@ -928,9 +1097,11 @@ for (const zone of zones) {
     if (!drag) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
+    const into = folderTarget(zone, e);
     const { beforeNode } = dropPosition(zone, e);
     clearIndicators();
-    if (beforeNode) beforeNode.classList.add('drop-before');
+    if (into) into.classList.add('drop-target');
+    else if (beforeNode) beforeNode.classList.add('drop-before');
     else zone.classList.add('drop-end');
   });
   zone.addEventListener('dragleave', e => {
@@ -953,10 +1124,31 @@ function handleDrop(zone, e) {
     else send('unpin', { pinId: id, windowId, spaceId, beforeTabId, place: true });
     return;
   }
-  const target = zone.id === 'essentials' ? null : spaceId;
-  if (kind === 'tab') send('pinTab', { tabId: id, spaceId: target, index });
-  else send('movePin', { pinId: id, spaceId: target, index });
+  if (zone.id === 'essentials') {
+    if (kind === 'tab') send('pinTab', { tabId: id, spaceId: null, index });
+    else send('movePin', { pinId: id, spaceId: null, index });
+    return;
+  }
+  // Pinned list: work out the folder and the position in the space's pin order.
+  const order = spacePins(spaceId).filter(p => !(kind === 'pin' && p === id));
+  const into = folderTarget(zone, e);
+  let folderId = null;
+  let at;
+  if (into) {
+    folderId = into.dataset.id;
+  } else if (beforeNode?.dataset.kind === 'pin') {
+    folderId = beforeNode.dataset.folderId || null;
+    at = order.indexOf(beforeNode.dataset.id);
+  } else if (beforeNode?.dataset.kind === 'folder') {
+    // Pins come before subfolders at each level, so "before a folder" means the end of
+    // that folder's parent level.
+    folderId = config.folders[beforeNode.dataset.id]?.parentId ?? null;
+  }
+  if (kind === 'tab') act('pinTab', { tabId: id, spaceId, index: at, folderId });
+  else act('movePin', { pinId: id, spaceId, index: at, folderId });
 }
+
+const spacePins = spaceId => config.spaces.find(s => s.id === spaceId)?.pins ?? [];
 
 $('#spaces').addEventListener('dragover', e => {
   const btn = e.target.closest('.space-btn');
@@ -979,21 +1171,46 @@ $('#spaces').addEventListener('drop', e => {
 // ---------------------------------------------------------------------------------------
 // Boot
 
+// The only writer of #toast, so an Undo toast can't be cut short by a second timer.
 let toastTimer;
-function showToast(text) {
+function showToast(text, { action, duration = 1800 } = {}) {
   const toast = $('#toast');
-  toast.textContent = text;
+  toast.replaceChildren(document.createTextNode(text));
+  if (action) {
+    const button = Object.assign(document.createElement('button'), { type: 'button', textContent: action.label });
+    button.onclick = () => {
+      toast.classList.remove('show');
+      action.run();
+    };
+    toast.append(button);
+  }
+  toast.classList.toggle('actionable', !!action);
   toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), duration);
 }
+
+// Like send(), but a failure (e.g. "a folder can't go inside itself") shows as a toast.
+async function act(type, payload = {}) {
+  const res = await chrome.runtime.sendMessage({ type, ...payload });
+  if (!res?.ok) showToast(res?.error || 'That didn’t work. Try again.', { duration: 3500 });
+  return res?.result;
+}
+
 const SERVICE_WORKER = chrome.runtime.getURL('src/background.js');
 chrome.runtime.onMessage.addListener((msg, sender) => {
-  if (sender.url !== SERVICE_WORKER) return;
-  if (msg?.target === 'panel' && msg.type === 'toast' && msg.windowId === windowId) showToast(msg.text);
+  if (sender.url !== SERVICE_WORKER || msg?.target !== 'panel' || msg.windowId !== windowId) return;
+  if (msg.type === 'toast') showToast(msg.text);
+  if (msg.type === 'archived') {
+    showToast(msg.count === 1 ? 'Tab closed' : `${msg.count} tabs closed`, {
+      action: { label: 'Undo', run: () => act('undoArchive', { windowId }) },
+      duration: 6000,
+    });
+  }
 });
 
-chrome.storage.onChanged.addListener(schedule);
+// The archive and search memory have their own keys; the panel doesn't show either.
+chrome.storage.onChanged.addListener(changes => (changes.config || changes.rt) && schedule());
 for (const ev of ['onCreated', 'onUpdated', 'onRemoved', 'onMoved', 'onActivated', 'onAttached', 'onDetached', 'onReplaced']) {
   chrome.tabs[ev].addListener(schedule);
 }
@@ -1004,6 +1221,7 @@ async function loadShortcuts() {
   for (const c of await chrome.commands.getAll()) {
     const n = c.name.match(/^space-(\d)$/)?.[1];
     if (n && c.shortcut) spaceShortcuts[n - 1] = c.shortcut;
+    if (c.name === 'search') $('#search-btn').title = c.shortcut ? `Search (${c.shortcut})` : 'Search';
   }
   render();
 }

@@ -15,6 +15,14 @@
   await chrome.tabs.update(pr.id, { url: B + '/prs/12345' });
   const lucide = await mk('/lucide'); await sleep(300);
   await send('pinTab', { tabId: lucide.id, spaceId: c.spaces[0].id });
+  const reports = (await send('createFolder', { spaceId: c.spaces[0].id, name: 'Reports' })).result;
+  const q3 = (await send('createFolder', { spaceId: c.spaces[0].id, name: 'Q3', parentId: reports })).result;
+  for (const [path, folderId] of [['/weekly', reports], ['/q3-board', q3], ['/q3-budget', q3]]) {
+    const t = await mk(path);
+    await sleep(300);
+    await send('pinTab', { tabId: t.id, spaceId: c.spaces[0].id, folderId });
+  }
+  await send('createFolder', { spaceId: c.spaces[0].id, name: 'Reading list' });
   await mk('/search?q=best+lightweight+llm+local+coding');
   await mk('/docs', true);
   await send('createSpace', { name: 'local', icon: '🧪', color: 'cyan' });

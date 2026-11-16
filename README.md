@@ -1,7 +1,11 @@
 # Cove
 
 Vertical tabs for Chrome, in the side panel: spaces, pinned tabs that remember their home URL,
-Essentials shared across every space, and Peek for opening links without losing your place.
+folders, Essentials shared across every space, Peek for opening links without losing your place,
+a search launcher, and an archive of closed tabs you can bring back.
+
+Search, folders and the archive build on a contribution by Julio Orozco
+([drewcoble/cove#1](https://github.com/drewcoble/cove/pull/1)).
 
 ## Install
 
@@ -28,6 +32,7 @@ storage to its folder, so export before moving or renaming the folder, and impor
 | Space           | One tab group per window, titled with the space name, in the space color  |
 | Essentials      | Chrome-pinned tabs (shared across spaces, never grouped)                  |
 | Pinned tab      | A saved entry in the space, bound to a live tab while it's open           |
+| Folder          | Sidebar-only grouping of a space's pinned tabs (nested); no Chrome change |
 
 Because each space is a group, space-mates stay contiguous in the tab strip. Inactive spaces are
 collapsed by default, so the strip only shows the current space (you can turn that off in settings).
@@ -77,6 +82,23 @@ collapsed by default, so the strip only shows the current space (you can turn th
 - **Jump to a space by number:** "Go to space 1–9" commands exist but have no default keys
   (Chrome lets an extension suggest only 4). Bind them yourself at `chrome://extensions/shortcuts`,
   e.g. ⌃1, ⌃2, ⌃3. Hovering a space dot shows its shortcut once it's bound.
+- **Search (⌘K):** press the search shortcut (or the magnifier at the top of the sidebar) to
+  search open tabs, pinned tabs (by your names), spaces, the archive and recent history, or type
+  a URL or a web search. ↑/↓ and ↵ to pick; type `>` for commands (new folder, view archive,
+  undo last close); Esc closes. Search appears over the current page; on pages Chrome doesn't let
+  extensions touch (`chrome://` pages, the Web Store, PDFs) it opens as a temporary tab instead.
+  It only runs when you open it, so sites keep their own ⌘K. Results are ranked by what you typed
+  first, then by how often and how recently you visit pages and what you picked before for the
+  same search; turn history off in settings, or forget remembered searches there.
+- **Folders:** right-click the space name → *New folder…*, or drag a tab or pinned tab onto the
+  middle of a folder. Folders nest; right-click one to rename it, add a subfolder, open all its
+  tabs, move it, or remove it (its pinned tabs and subfolders move up a level). Opening a pinned
+  tab expands the folders above it.
+- **Archive:** tabs you close are kept (the last 500, on this computer, sign-in parameters
+  stripped) so you can find and reopen them: the archive button at the bottom of the sidebar, or
+  *View archive* in search. Closing from the sidebar or **Clear** shows an Undo toast, and *Reopen
+  the last closed tab* (⌥⇧Z) brings back the last close in that window. Pinned tabs, Essentials,
+  Peeks, closed windows and deleted spaces aren't archived. Turn it off or clear it in settings.
 - **Copy current URL:** bind "Copy the current tab URL" to ⌘⇧C at `chrome://extensions/shortcuts`.
   Chrome won't assign it automatically because ⌘⇧C is also DevTools' Inspect shortcut. A ✓
   flashes on the toolbar icon, and the sidebar shows "Copied URL" if it's open.
@@ -91,6 +113,8 @@ keys shown; leave **Scope** as *In Chrome*).
 | Command                                                  | Shortcut  |
 | -------------------------------------------------------- | --------- |
 | Activate the extension (opens the sidebar)               | ⌘S        |
+| Search tabs, pins, spaces, history and commands          | ⌘K        |
+| Reopen the last closed tab (or cleared batch)            | ⌥⇧Z       |
 | Copy the current tab URL                                 | ⇧⌘C       |
 | Switch to the next space                                 | ⇧⌘→       |
 | Switch to the previous space                             | ⇧⌘←       |
@@ -104,8 +128,11 @@ Keyboard Shortcuts → Mission Control).
 
 ## Limits
 
-- Peek needs access to all sites so it can catch Option-clicks; that's the only reason the
-  extension asks for it. Tabs that were already open need a reload before Option-click works.
+- Peek needs access to all sites so it can catch Option-clicks, and search needs it to show its
+  panel over a page. Tabs that were already open need a reload before Option-click works.
+- Search asks to read your browsing history so it can suggest pages you've visited. History is
+  only read inside the extension's own search page and never sent to websites; turn it off in
+  settings to stop using it.
 - Opening a floating Peek as a tab reloads the page there, because Chrome doesn't allow moving a
   tab out of a popup window.
 - Chrome's horizontal tab strip can't be hidden by an extension. Collapsing inactive spaces keeps
@@ -131,6 +158,20 @@ Peek with real Option-clicks and key presses:
 
 ```bash
 node test/peek-input.mjs .
+```
+
+Search over real pages (what the page can and can't see, results, the restricted-page
+fallback, token checks):
+
+```bash
+node test/search.mjs .
+```
+
+Folders, import repair and the archive, then the 500-entry cap across a reload:
+
+```bash
+node test/harness.mjs . test/features.js
+node test/harness.mjs . test/archive-cap.js test/archive-cap-2.js
 ```
 
 Export → fresh install → import:

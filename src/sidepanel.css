@@ -702,3 +702,57 @@ body.dragging #essentials:empty::before {
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+/* ---------- folders, search, toast actions ---------- */
+
+.nav #search-btn {
+  margin-right: auto;
+}
+#pins .row {
+  padding-left: calc(10px + var(--depth, 0) * 14px);
+}
+.folder-row {
+  color: var(--muted);
+  gap: 6px;
+}
+.folder-row .title {
+  font-weight: 550;
+  color: var(--fg);
+}
+.folder-row .chevron svg {
+  width: 13px;
+  height: 13px;
+  transform: rotate(90deg);
+  transition: transform 0.15s ease;
+}
+.folder-row.collapsed .chevron svg {
+  transform: none;
+}
+.folder-row .count {
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--faint);
+}
+.folder-row.holds-active .title,
+.folder-row.holds-active .fav {
+  color: color-mix(in srgb, var(--space) 75%, var(--fg));
+}
+.folder-row.drop-target {
+  background: var(--active);
+  outline: 1px solid var(--space);
+}
+#toast.actionable {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  pointer-events: auto;
+}
+#toast button {
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--space) 80%, var(--fg));
+}
+#toast button:hover {
+  background: var(--hover);
+}
