@@ -13,6 +13,7 @@
 // from the restored tab groups and tab URLs.
 
 import { destinationKey, searchMemoryText, normalizeSearchMemory } from './search-ranking.js';
+import { validParent, descendants, tabSpace as treeSpace } from './tab-tree.js';
 import { isNewTabUrl, navigationUrl } from './search.js';
 import { COLORS, newId, sameUrl, isDrifted, isWebUrl, redactUrl } from './shared.js';
 
@@ -46,6 +47,9 @@ function emptyRt() {
     groupSpace: {}, // groupId -> spaceId
     activeSpace: {}, // windowId -> spaceId
     lastSpace: null,
+    treeDetached: {}, // explicit root tabs; do not re-adopt their original Chrome opener
+    tabParent: {}, // child tab ID -> live parent tab ID
+    treeCollapsed: {}, // spaceId:tabId -> collapsed
     tabSpace: {}, // tabId -> spaceId (kept so we still know a tab's space in onRemoved)
     commandSessions: {}, // tabId -> token and document identity for an open overlay
     tabSnapshots: {}, // last known ordinary-tab data for native closes
@@ -99,6 +103,7 @@ function normalizeConfig(c) {
 // Serialized execution: every event and message runs through one queue so async handlers
 // never interleave, and state is flushed to storage once per task.
 
+let treeRestoreIdentity;
 let dirtyConfig = false;
 let dirtyRt = false;
 const touchConfig = () => (dirtyConfig = true);
@@ -114,19 +119,26 @@ async function flush() {
   if (dirtyRt) {
     dirtyRt = false;
     writes.push(chrome.storage.session.set({ rt }));
+    const ids = new Set([...Object.keys(rt.tabParent), ...Object.values(rt.tabParent).map(String), ...Object.keys(rt.treeDetached), ...Object.keys(rt.treeCollapsed).map(key => key.slice(key.lastIndexOf(':') + 1))]);
+    const identities = Object.fromEntries([...ids].filter(id => rt.tabSnapshots[id]).map(id => [id, { windowId: rt.tabSnapshots[id].windowId, url: rt.tabSnapshots[id].url }]));
+    writes.push(chrome.storage.local.set({ tabTreeState: { parents: rt.tabParent, detached: rt.treeDetached, collapsed: rt.treeCollapsed, identities } }));
   }
   await Promise.all(writes);
   if (notifyOverlays) broadcastOverlayRefresh();
 }
 
 const ready = (async () => {
-  const [{ config: c, searchMemory }, { rt: r }] = await Promise.all([
-    chrome.storage.local.get(['config', 'searchMemory']),
+  const [{ config: c, searchMemory, tabTreeState }, { rt: r }] = await Promise.all([
+    chrome.storage.local.get(['config', 'searchMemory', 'tabTreeState']),
     chrome.storage.session.get('rt'),
   ]);
   if (searchMemory) await chrome.storage.local.set({ searchMemory: normalizeSearchMemory(searchMemory) });
   config = normalizeConfig(c);
   rt = { ...emptyRt(), ...r };
+  if (!r?.tabParent && tabTreeState) {
+    rt.tabParent = tabTreeState.parents || {}; rt.treeCollapsed = tabTreeState.collapsed || {};
+    rt.treeDetached = tabTreeState.detached || {}; treeRestoreIdentity = tabTreeState.identities || {};
+  }
   touchConfig(); // Persist schema migrations as well as first-run defaults.
   await chrome.storage.local.set({ peekOnAltClick: !!config.settings.peekOnAltClick });
   await reconcile().catch(e => console.error('[cove] reconcile failed', e));
@@ -208,8 +220,8 @@ async function putTabInSpace(tab, spaceId) {
   collapseSoon(tab.windowId);
 }
 
-async function createTabInSpace(windowId, spaceId, { url, active = true } = {}) {
-  const tab = await safe(() => chrome.tabs.create({ windowId, url, active }));
+async function createTabInSpace(windowId, spaceId, { url, active = true, openerTabId } = {}) {
+  const tab = await safe(() => chrome.tabs.create({ windowId, url, active, ...(openerTabId != null ? { openerTabId } : {}) }));
   await putTabInSpace(tab, spaceId);
   return tab;
 }
@@ -441,10 +453,70 @@ function parseSetup(data) {
   return normalizeConfig({ version: 2, spaces, essentials, pins, folders, settings });
 }
 
+// Tree relationships are session state, independent of saved pin/folder membership.
+async function pruneTabTree() {
+  const tabs = await chrome.tabs.query({});
+  const byId = new Map(tabs.map(tab => [tab.id, tab]));
+  for (const [child, parent] of Object.entries(rt.tabParent)) {
+    if (!validParent(byId.get(+child), byId.get(parent), rt)) { delete rt.tabParent[child]; rt.treeDetached[child] = true; }
+  }
+  for (const id of Object.keys(rt.treeDetached)) if (!byId.has(+id)) delete rt.treeDetached[id];
+  for (const key of Object.keys(rt.treeCollapsed)) if (!byId.has(+key.slice(key.lastIndexOf(':') + 1))) delete rt.treeCollapsed[key];
+  touchRt();
+}
+function revealTabParents(tab) {
+  const spaceId = treeSpace(tab, rt) || windowSpace(tab.windowId);
+  const seen = new Set(); let id = rt.tabParent[tab.id];
+  while (id != null && !seen.has(id)) {
+    seen.add(id); delete rt.treeCollapsed[`${spaceId}:${id}`];
+    revealPinFolders(rt.tabPin[id]); id = rt.tabParent[id];
+  }
+  touchRt();
+}
+async function adoptTreeOpener(tab) {
+  if (rt.tabParent[tab.id] == null && isNewTabUrl(tab.pendingUrl || tab.url, chrome.runtime.getURL(''))) {
+    rt.treeDetached[tab.id] = true; touchRt(); return;
+  }
+  if (!/^(https?:|file:)/i.test(tab.pendingUrl || tab.url || '')) return;
+  if (rt.tabParent[tab.id] != null || rt.treeDetached[tab.id] || tab.openerTabId == null) return;
+  const parent = await getTab(tab.openerTabId);
+  if (validParent(tab, parent, rt)) { rt.tabParent[tab.id] = parent.id; touchRt(); }
+}
+
 // ---------------------------------------------------------------------------------------
 // Message handlers (called from the side panel)
 
 const handlers = {
+  async setTabParent({ tabId, parentId = null, beforeTabId = null }) {
+    const tab = await getTab(tabId);
+    if (!tab || tab.pinned || rt.tabPin[tabId]) throw new Error('Choose an ordinary tab to move.');
+    if (parentId != null) {
+      const parent = await getTab(parentId);
+      if (!validParent(tab, parent, rt) || descendants(tabId, rt.tabParent).includes(parentId)) throw new Error('Choose a parent in the same window and space, outside this branch.');
+      delete rt.treeDetached[tabId];
+      rt.tabParent[tabId] = parentId;
+      delete rt.treeCollapsed[`${treeSpace(tab, rt)}:${parentId}`];
+    } else { delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; }
+    touchRt();
+    if (beforeTabId != null) await handlers.moveTab({ tabId, spaceId: treeSpace(tab, rt), beforeTabId });
+    const current = await getTab(tabId); if (current) rememberTab(current);
+  },
+  async toggleTabTree({ windowId, tabId, spaceId }) {
+    const tab = await getTab(tabId);
+    if (!tab || tab.windowId !== windowId || !spaceById(spaceId)) return;
+    const key = `${spaceId}:${tabId}`;
+    if (rt.treeCollapsed[key]) delete rt.treeCollapsed[key]; else rt.treeCollapsed[key] = true;
+    touchRt();
+  },
+  async newChildTab({ tabId }) {
+    const parent = await getTab(tabId);
+    if (!parent) return;
+    const spaceId = treeSpace(parent, rt) || windowSpace(parent.windowId);
+    const child = await createTabInSpace(parent.windowId, spaceId, { openerTabId: parent.id });
+    delete rt.treeDetached[child.id];
+    rt.tabParent[child.id] = parent.id; revealTabParents(child); touchRt();
+    return child.id;
+  },
   async switchSpace({ windowId, spaceId }) {
     if (!spaceById(spaceId)) return;
     setWindowSpace(windowId, spaceId);
@@ -614,6 +686,7 @@ const handlers = {
     const existing = rt.tabPin[tabId];
     if (existing && config.pins[existing]) return handlers.movePin({ pinId: existing, spaceId, index, folderId });
     validateFolder(folderId, spaceId);
+    delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchRt();
     const pin = createPin(tab, spaceId, index);
     pin.folderId = folderId;
     bindTab(tabId, pin.id);
@@ -632,7 +705,7 @@ const handlers = {
     pin.spaceId = spaceId;
     touchConfig();
     const bound = await boundTabs(pinId);
-    if (changed) for (const t of bound) await placePinTab(t, spaceId);
+    if (changed) { for (const t of bound) await placePinTab(t, spaceId); await pruneTabTree(); }
     if (bound.some(t => t.active)) revealPinFolders(pinId);
   },
 
@@ -696,6 +769,7 @@ const handlers = {
       return handlers.unpin({ pinId, windowId: tab.windowId, spaceId, beforeTabId, place: true });
     }
     if (tab.pinned || tabSpaceOf(tab) !== spaceId) await putTabInSpace(tab, spaceId);
+    await pruneTabTree();
     tab = await getTab(tabId);
     if (!tab) return;
     const groupId = tab.groupId;
@@ -783,7 +857,7 @@ function validateFolder(folderId, spaceId) {
 }
 
 function snapshotTab(tab) {
-  return { tabId: tab.id, windowId: tab.windowId, spaceId: tabSpaceOf(tab),
+  return { tabId: tab.id, parentTabId: rt.tabParent[tab.id] ?? null, parentPinId: rt.tabPin[rt.tabParent[tab.id]] ?? null, windowId: tab.windowId, spaceId: tabSpaceOf(tab),
     url: redactUrl(tab.pendingUrl || tab.url, { keepHash: true }), title: tab.title || '', index: tab.index,
     favIconUrl: goodFavicon(tab.favIconUrl), active: tab.active };
 }
@@ -855,6 +929,7 @@ Object.assign(handlers, {
   async restoreArchive({ windowId, entryIds }) {
     const entries = [...new Set(entryIds)].map(id => config.archive.find(e => e.id === id)).filter(Boolean);
     const restored = [];
+    const treeEntries = [];
     let focus = null;
     for (const entry of entries) {
       const spaceId = spaceById(entry.spaceId) ? entry.spaceId : windowSpace(windowId);
@@ -863,9 +938,18 @@ Object.assign(handlers, {
       config.archive = config.archive.filter(e => e.id !== entry.id);
       touchConfig();
       restored.push(tab.id);
+      treeEntries.push({ entry, tab });
       if (entry.active || !focus) focus = { tab, spaceId };
     }
+    const restoredIds = new Map(treeEntries.map(({ entry, tab }) => [entry.tabId, tab.id]));
+    for (const { entry, tab } of treeEntries) {
+      const parentId = restoredIds.get(entry.parentTabId) || (entry.parentPinId && (await boundTab(entry.parentPinId, windowId))?.id) || entry.parentTabId;
+      const parent = parentId != null ? await getTab(parentId) : null;
+      if (validParent(tab, parent, rt)) rt.tabParent[tab.id] = parent.id;
+    }
+    touchRt();
     if (focus) {
+      revealTabParents(focus.tab);
       setWindowSpace(windowId, focus.spaceId);
       await chrome.tabs.update(focus.tab.id, { active: true });
       await applyCollapse(windowId);
@@ -1123,7 +1207,7 @@ Object.assign(handlers, {
       throw new Error('The source is no longer an Essential.');
     }
     const spaceId = windowSpace(source.windowId);
-    const tab = await createTabInSpace(source.windowId, spaceId, { url });
+    const tab = await createTabInSpace(source.windowId, spaceId, { url, openerTabId: source.id });
     setWindowSpace(source.windowId, spaceId);
     await applyCollapse(source.windowId);
     return tab.id;
@@ -1152,11 +1236,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ---------------------------------------------------------------------------------------
 // Tab / group / window events
 
-chrome.tabs.onCreated.addListener(tab => enqueue(() => onTabCreated(tab.id)));
+chrome.tabs.onCreated.addListener(tab => {
+  const createdUrl = tab.pendingUrl || tab.url;
+  enqueue(() => onTabCreated(tab.id, createdUrl));
+});
 
-async function onTabCreated(tabId) {
+async function onTabCreated(tabId, createdUrl) {
   const tab = await getTab(tabId);
   if (!tab || !(await isNormalWindow(tab.windowId))) return;
+  // Preserve the creation intent even if the user submits a URL before this queued handler runs.
+  if (rt.tabParent[tabId] == null && isNewTabUrl(createdUrl, chrome.runtime.getURL(''))) { rt.treeDetached[tabId] = true; touchRt(); }
   if (rt.tabPeeks[tab.id]?.split) return;
   if (tab.pinned) {
     if (!rt.tabPin[tab.id]) bindTab(tab.id, createPin(tab, null).id);
@@ -1168,6 +1257,8 @@ async function onTabCreated(tabId) {
   if (grouped) {
     // Chrome already put it in a space's group (e.g. link opened from a grouped tab).
     rt.tabSpace[tab.id] = grouped;
+    await adoptTreeOpener(tab);
+    if (tab.active) revealTabParents(tab);
     rememberTab(tab);
     touchRt();
     return;
@@ -1177,6 +1268,8 @@ async function onTabCreated(tabId) {
     (!fromEssential && tab.openerTabId != null && rt.tabSpace[tab.openerTabId]) ||
     windowSpace(tab.windowId);
   await putTabInSpace(tab, spaceId);
+  await adoptTreeOpener(tab);
+  if (tab.active) revealTabParents(tab);
   rememberTab(tab);
   if (tab.active) setWindowSpace(tab.windowId, spaceId);
 }
@@ -1201,6 +1294,7 @@ async function onTabUpdated(tabId, ci) {
     if (ci.splitViewId === chrome.tabs.SPLIT_VIEW_ID_NONE) await handlers.peekExpand({ tabId });
     return;
   }
+  if ('url' in ci) { await adoptTreeOpener(tab); if (tab.active) revealTabParents(tab); }
   rememberTab(tab);
   const pinId = rt.tabPin[tabId];
   const pin = pinId ? config.pins[pinId] : null;
@@ -1208,6 +1302,7 @@ async function onTabUpdated(tabId, ci) {
   if (pin && tab.active && ci.url) revealPinFolders(pinId);
 
   if ('pinned' in ci) {
+    if (tab.pinned) { delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchRt(); }
     if (tab.pinned) {
       // Pinned via Chrome's tab strip: treat it as "add to Essentials".
       delete rt.tabSpace[tabId];
@@ -1243,6 +1338,7 @@ async function onTabUpdated(tabId, ci) {
     }
   }
 
+  if ('groupId' in ci || 'pinned' in ci) await pruneTabTree();
   if (!pin) return;
   const url = tab.url || tab.pendingUrl;
   if ('url' in ci && url && pin.lastUrl !== redactUrl(url, { keepHash: true })) {
@@ -1282,6 +1378,7 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
     const tab = await getTab(tabId);
     if (!tab) return;
     revealPinFolders(rt.tabPin[tabId]);
+    revealTabParents(tab);
     if (tab.pinned) return;
     const spaceId = tabSpaceOf(tab);
     if (!spaceId || spaceId === rt.activeSpace[windowId]) return;
@@ -1301,6 +1398,13 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
     if (!expectedRemovals.has(tabId) && !isWindowClosing && !rt.tabPin[tabId] && !isPeekTab(tabId)) {
       archiveTabs(rt.tabSnapshots[tabId] ? [{ ...rt.tabSnapshots[tabId], spaceId }] : []);
     }
+    const parent = rt.tabParent[tabId];
+    for (const [child, id] of Object.entries(rt.tabParent)) if (id === tabId) {
+      if (parent != null) rt.tabParent[child] = parent; else { delete rt.tabParent[child]; rt.treeDetached[child] = true; const current = await getTab(+child); if (current) rememberTab(current); }
+    }
+    delete rt.tabParent[tabId]; delete rt.treeDetached[tabId];
+    for (const [child, id] of Object.entries(rt.tabParent)) if (id === parent) { const current = await getTab(+child); if (current) rememberTab(current); }
+    for (const key of Object.keys(rt.treeCollapsed)) if (key.endsWith(`:${tabId}`)) delete rt.treeCollapsed[key];
     delete rt.commandSessions[tabId];
     delete rt.tabSnapshots[tabId];
     const wasActive = wasActiveTab(windowId, tabId, at);
@@ -1340,17 +1444,21 @@ chrome.tabs.onAttached.addListener((tabId, { newWindowId }) =>
     if (known && !spaceById(rt.activeSpace[newWindowId])) setWindowSpace(newWindowId, known);
     const spaceId = known ?? windowSpace(newWindowId);
     if (rt.groupSpace[tab.groupId] !== spaceId) await putTabInSpace(tab, spaceId);
+    await pruneTabTree();
   }),
 );
 
 chrome.tabs.onReplaced.addListener((added, removed) =>
   enqueue(async () => {
-    for (const map of [rt.tabSpace, rt.tabPin]) {
+    for (const map of [rt.tabSpace, rt.tabPin, rt.tabParent, rt.treeDetached]) {
       if (removed in map) {
         map[added] = map[removed];
         delete map[removed];
       }
     }
+    for (const [child, parent] of Object.entries(rt.tabParent)) if (parent === removed) rt.tabParent[child] = added;
+    for (const key of Object.keys(rt.treeCollapsed)) if (key.endsWith(`:${removed}`)) { rt.treeCollapsed[key.slice(0, key.lastIndexOf(':') + 1) + added] = rt.treeCollapsed[key]; delete rt.treeCollapsed[key]; }
+    const replacement = await getTab(added); if (replacement) rememberTab(replacement);
     for (const list of Object.values(rt.mru)) {
       const i = list.indexOf(removed);
       if (i !== -1) list[i] = added;
@@ -1675,6 +1783,16 @@ async function reconcile() {
   for (const id of windowIds) windowTypes.set(id, 'normal');
   const liveTabs = new Map(windows.flatMap(w => w.tabs.map(t => [t.id, t])));
 
+  if (treeRestoreIdentity) {
+    const matches = id => {
+      const tab = liveTabs.get(+id), saved = treeRestoreIdentity[id];
+      return tab && saved && tab.windowId === saved.windowId && redactUrl(tab.pendingUrl || tab.url, { keepHash: true }) === saved.url;
+    };
+    for (const [child, parent] of Object.entries(rt.tabParent)) if (!matches(child) || !matches(parent)) delete rt.tabParent[child];
+    for (const id of Object.keys(rt.treeDetached)) if (!matches(id)) delete rt.treeDetached[id];
+    for (const key of Object.keys(rt.treeCollapsed)) if (!matches(key.slice(key.lastIndexOf(':') + 1))) delete rt.treeCollapsed[key];
+    treeRestoreIdentity = null;
+  }
   const groups = (await chrome.tabGroups.query({})).filter(g => windowIds.has(g.windowId));
   const liveGroups = new Set(groups.map(g => g.id));
   for (const [gid, sid] of Object.entries(rt.groupSpace)) {
@@ -1771,6 +1889,9 @@ async function reconcile() {
     }
   }
 
+  await pruneTabTree();
+  if (initial) for (const tab of liveTabs.values()) await adoptTreeOpener(tab);
+  for (const tab of liveTabs.values()) if (tab.active) revealTabParents(tab);
   for (const id of Object.keys(rt.commandSessions)) if (!liveTabs.has(+id)) delete rt.commandSessions[id];
   for (const id of Object.keys(rt.tabSnapshots)) if (!liveTabs.has(+id)) delete rt.tabSnapshots[id];
   for (const tab of liveTabs.values()) {

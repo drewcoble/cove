@@ -66,6 +66,16 @@ collapsed by default, so the strip only shows the current space (you can turn th
   and scrolls the active row into view, including when selected through floating search or
   Chrome's tab strip. You can still collapse the folder manually until the tab is selected
   or navigated again. Moving a pin to another space clears its folder membership.
+- **Tab trees:** links opened in new tabs are nested beneath their source tab.
+  Ordinary New Tabs (including Command/Ctrl+T) stay at the top level after a search or URL entry. Use the
+  disclosure arrow to collapse a branch; the count includes its descendants. Selecting a
+  hidden child reveals its ancestors. Drag onto the middle/right side of another tab to
+  make it a child, or use **Move out of parent tab** from its context menu. **New child tab**
+  creates a blank tab under the selected parent. Closing a parent keeps children open and
+  promotes them one level. Space-pin children appear under the pin inside its folder;
+  links from shared Essentials have a per-space “From …” header. Tree layout and manual
+  detach choices survive extension reloads for surviving tabs. Browser restoration can
+  also recover link relationships when Chrome retains their opener information.
 - **Archive and undo:** ordinary tabs closed from the sidebar or Chrome's tab strip go
   into the archive. **Clear** archives the space's other unpinned tabs as one batch, keeping the tab you are viewing. Click **Undo**
   in the notification, use **Undo last close** in the command bar/archive, or press

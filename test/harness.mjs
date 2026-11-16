@@ -17,16 +17,18 @@ const [extArg, testFile, phase2File] = process.argv.slice(2);
 const extPath = path.resolve(extArg);
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
+let fixturePort;
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/redirect')) { res.writeHead(302, { Location: '/home' }); return res.end(); }
   const headers = { 'content-type': 'text/html' };
   if (req.url.startsWith('/strict-csp')) headers['Content-Security-Policy'] = "default-src 'none'; script-src 'none'; style-src 'none'; connect-src 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
   res.writeHead(200, headers);
   // #far points at another site (localhost vs 127.0.0.1) for Essential-link tests; #blank opens a same-site tab.
-  res.end(`<title>Page ${req.url}</title><a id="l" href="/other">x</a> <a id="far" href="http://localhost:${server.address().port}/far">far</a> <a id="blank" href="/opened" target="_blank">blank</a>`);
+  res.end(`<title>Page ${req.url}</title><a id="l" href="/other">x</a> <a id="far" href="http://localhost:${fixturePort}/far">far</a> <a id="blank" href="/opened" target="_blank">blank</a>`);
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
-const base = `http://127.0.0.1:${server.address().port}`;
+fixturePort = server.address().port;
+const base = `http://127.0.0.1:${fixturePort}`;
 
 const profile = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'zt-profile-'));
 const chrome = spawn(CHROME, [

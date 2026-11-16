@@ -46,6 +46,8 @@ export async function run({ cdp, sessionId: control, base }) {
     const newTab = await api(`chrome.tabs.query({windowId:${W},url:${JSON.stringify(base + '/same-site-new')}}).then(t=>t[0])`);
     await wait(async () => (await rt()).tabSpace[newTab.id] === space);
     ok(true, 'target=_blank links on the same site join the current space');
+    await wait(async () => (await rt()).tabParent[newTab.id] === essential);
+    ok(true, 'native new-tab links become children of their Essential source');
 
     await api(`chrome.tabs.update(${essential}, {active:true})`);
     await ev(source, `(() => { const a=document.createElement('a');a.id='bg';a.href=${JSON.stringify(base + '/background-link')};a.textContent='background';document.body.append(a); })()`);
@@ -61,6 +63,8 @@ export async function run({ cdp, sessionId: control, base }) {
     const scripted = await api(`chrome.tabs.query({windowId:${W},url:${JSON.stringify(base + '/script-link')}}).then(t=>t[0])`);
     await wait(async () => (await rt()).tabSpace[scripted.id] === space);
     ok(!!(await tab(scripted.id)), 'script-opened links stay alive and join the current space');
+    await wait(async () => (await rt()).tabParent[scripted.id] === essential);
+    ok(true, 'blank script-opened tabs gain their parent when their destination loads');
 
     await api(`chrome.tabs.update(${essential}, {active:true})`);
     await click(source, '#l');

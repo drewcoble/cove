@@ -774,3 +774,15 @@ button:focus-visible { outline: 2px solid var(--space); outline-offset: -2px; }
   flex-wrap: wrap;
   gap: 4px 14px;
 }
+
+/* Live tab trees share the same row layout as space pins. */
+.tree-row { position: relative; }
+.tree-toggle { width: 16px; height: 24px; padding: 0; flex: none; color: var(--muted); background: none; border: 0; border-radius: 4px; cursor: pointer; }
+.tree-toggle:hover { color: var(--fg); background: var(--tile-hover); }
+.tree-toggle:focus-visible { outline: 2px solid var(--space); }
+.tree-count { flex: none; font-size: 10px; color: var(--muted); min-width: 16px; text-align: center; }
+.tree-child::after { content: ''; position: absolute; left: calc(1px + var(--tree-depth) * 16px); top: 50%; width: 6px; border-top: 1px solid var(--sep); pointer-events: none; }
+.tree-child::before { content: ''; position: absolute; left: calc(1px + var(--tree-depth) * 16px); top: -2px; bottom: -2px; width: 7px; border-left: 1px solid var(--sep); pointer-events: none; }
+.tree-root { color: var(--muted); font-size: 11px; }
+.tree-root .close, .tree-root .audio { display: none !important; }
+.row.drop-into-tree { background: var(--active); outline: 2px solid var(--space); outline-offset: -2px; }

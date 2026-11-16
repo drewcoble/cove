@@ -98,19 +98,22 @@ export function createOrganizer(env) {
     ].filter(Boolean);
   }
 
-  function renderPins(space, withTab) {
+  function renderPins(space, withTab, tree) {
     const items = [];
     const allFolders = folders(space.id);
     const allPins = space.pins.filter(id => env.state().config.pins[id]).map(withTab);
     function visit(parentId, depth) {
-      for (const entry of allPins.filter(x => (x.pin.folderId ?? null) === parentId)) items.push({ ...entry, depth });
+      for (const entry of allPins.filter(x => (x.pin.folderId ?? null) === parentId)) {
+        items.push({ ...entry, depth });
+        if (entry.tab) for (const child of tree.children(entry.tab.id, depth + 1)) items.push({ ...child, treeEntry: true });
+      }
       for (const folder of allFolders.filter(f => (f.parentId ?? null) === parentId)) {
         items.push({ folder, depth });
         if (!folder.collapsed) visit(folder.id, depth + 1);
       }
     }
     visit(null, 0);
-    env.syncList($('#pins'), items, x => x.folder ? 'f' + x.folder.id : 'p' + x.pin.id,
+    env.syncList($('#pins'), items, x => x.folder ? 'f' + x.folder.id : x.treeEntry ? 't' + x.tab.id : 'p' + x.pin.id,
       x => {
         if (!x.folder) return env.createRow();
         const button = document.createElement('button');
@@ -121,9 +124,14 @@ export function createOrganizer(env) {
       },
       (node, entry) => {
         node.style.setProperty('--depth', entry.depth);
+        if (entry.treeEntry) {
+          env.updateTabRow(node, entry.tab); env.decorateTreeRow(node, entry);
+          delete node.dataset.folderId; return;
+        }
         if (!entry.folder) {
           env.updatePinRow(node, entry);
           node.dataset.folderId = entry.pin.folderId || '';
+          env.decorateTreeRow(node, { ...entry, ...(entry.tab ? tree.info(entry.tab.id) : {}) });
           return;
         }
         const f = entry.folder;
