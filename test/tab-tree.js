@@ -74,6 +74,12 @@
     await chrome.tabs.update(control,{active:true});
     await wait(()=>document.querySelector(`#tabs .tree-root[data-id="${essential}"]`) && row(essentialChild));
     ok(row(essentialChild).style.getPropertyValue('--tree-depth')==='1','Essential links appear under a per-space origin header');
+    const restorable=await make(essential,'Essential-restored-child');
+    await chrome.tabs.remove(restorable);
+    await wait(async()=> (await chrome.storage.local.get('archive')).archive.some(entry=>entry.tabId===restorable));
+    await send('undoArchive',{windowId:W});
+    const reopenedEssentialChild=(await chrome.tabs.query({windowId:W})).find(t=>(t.url||t.pendingUrl)==='__BASE__/Essential-restored-child');
+    ok(reopenedEssentialChild && (await rt()).tabParent[reopenedEssentialChild.id]===essential,'Undo of a native close restores a child under its live Essential parent');
     const other=await send('createSpace',{name:'Other'});
     const alien=await send('newTab',{windowId:W,spaceId:other,url:'__BASE__/Other-space'});
     const invalid=await chrome.runtime.sendMessage({type:'setTabParent',tabId:alien,parentId:detail});
@@ -92,13 +98,15 @@
     const branch=await send('newTab',{windowId:W,spaceId:main,url:'__BASE__/Undo-parent'});
     const leaf=await make(branch,'Undo-child');
     await send('closeTabs',{windowId:W,tabIds:[branch,leaf]});
-    const restored=await send('undoArchive',{windowId:W});
-    ok(restored.length===2 && (await rt()).tabParent[restored[1]]===restored[0],'undo restores archived parent/child relationships in a batch');
+    const restoredCount=await send('undoArchive',{windowId:W});
+    const reopened=await chrome.tabs.query({windowId:W});
+    const restored=['Undo-parent','Undo-child'].map(path=>reopened.find(t=>t.url==='__BASE__/'+path || t.pendingUrl==='__BASE__/'+path)?.id);
+    ok(restoredCount===2 && (await rt()).tabParent[restored[1]]===restored[0],'undo restores archived parent/child relationships in a batch');
     await chrome.tabs.update(control,{active:true});
     const collapsedParent=restored[0];
     await send('toggleTabTree',{windowId:W,tabId:collapsedParent,spaceId:main});
     await chrome.tabs.update(essential,{active:true});
-    await chrome.storage.local.set({__tabTreeExpect:{detail,collapsedParent,leaf:restored[1],main}});
+    await chrome.storage.local.set({__tabTreeExpect:{detail,collapsedParent,leaf:restored[1],essential,essentialChild,main}});
     ok(true,'tree persistence fixture saved');
   } catch(error){log.push('FAIL '+error.stack);}
   return log.join('\n');

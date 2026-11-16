@@ -9,6 +9,7 @@
   <body>
     <header id="toolbar">
       <div class="nav">
+        <button id="search-btn" class="icon-btn" title="Search"></button>
         <button id="back" class="icon-btn" title="Back"></button>
         <button id="forward" class="icon-btn" title="Forward"></button>
         <button id="reload" class="icon-btn" title="Reload"></button>
@@ -17,8 +18,6 @@
         <input id="url" spellcheck="false" placeholder="Search or enter address" />
       </form>
     </header>
-
-    <button id="command-launch" class="command-launch">Search tabs or run a command <kbd>⌥K</kbd></button>
 
     <section id="essentials" class="zone"></section>
 
@@ -32,7 +31,7 @@
         <div id="pins" class="zone list"></div>
         <div id="divider">
           <span class="line"></span>
-          <button id="clear" title="Archive other unpinned tabs in this space; keep the current tab">Clear</button>
+          <button id="clear" title="Close all unpinned tabs in this space">Clear</button>
         </div>
         <div id="new-tab" class="row">
           <span class="fav"></span>
@@ -43,8 +42,8 @@
     </main>
 
     <footer id="bottombar">
-      <button id="archive-launch" class="icon-btn" title="Archive and undo closed tabs" aria-label="Open archive">↶</button>
       <button id="settings" class="icon-btn" title="Settings"></button>
+      <button id="archive-btn" class="icon-btn" title="Closed tabs (archive)"></button>
       <div id="spaces"></div>
       <button id="add-space" class="icon-btn" title="New space"></button>
     </footer>
@@ -52,14 +51,6 @@
     <div id="menu" hidden></div>
     <div id="popover" hidden></div>
     <div id="toast" role="status" aria-live="polite"></div>
-    <dialog id="organizer-dialog" aria-labelledby="organizer-title">
-      <header class="dialog-heading"><h2 id="organizer-title">Command bar</h2><button id="organizer-close" aria-label="Close">✕</button></header>
-      <input id="organizer-search" type="search" autocomplete="off" spellcheck="false" aria-label="Search tabs and commands" role="combobox" aria-expanded="true" aria-controls="organizer-results" aria-autocomplete="list">
-      <div id="organizer-tools" hidden><button id="archive-undo">Undo last close</button><span>Up to 500 closed tabs</span></div>
-      <p id="organizer-error" role="alert" hidden></p>
-      <div id="organizer-results" role="listbox" aria-label="Results"></div>
-      <p class="dialog-help">↑ ↓ to choose · Enter to open · Esc to close</p>
-    </dialog>
 
     <script type="module" src="sidepanel.js"></script>
   </body>

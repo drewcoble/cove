@@ -7,22 +7,32 @@
 //   - Pinned tabs are entries in a space's `pins` list. A pin is "bound" to at most one live
 //     tab per window; closing that tab leaves the pin in the sidebar, unloaded.
 //
-// Persistent config (spaces, pins, settings) lives in storage.local. Runtime bookkeeping
-// keyed by tab/group/window ids lives in storage.session, which survives service-worker
-// restarts but not browser restarts; on a fresh browser session `reconcile()` rebuilds it
-// from the restored tab groups and tab URLs.
+//   - Folders organize a space's pinned tabs (nested, per space). They're purely a sidebar
+//     grouping: Chrome still has one tab group per space.
+//
+// Persistent config (spaces, pins, folders, settings) lives in storage.local. The closed-tab
+// archive has its own storage.local key, so tab closes never rewrite the setup and setup
+// edits never rewrite the archive. Runtime bookkeeping keyed by tab/group/window ids lives in
+// storage.session, which survives service-worker restarts but not browser restarts; on a
+// fresh browser session `reconcile()` rebuilds it from the restored tab groups and tab URLs.
 
-import { destinationKey, searchMemoryText, normalizeSearchMemory } from './search-ranking.js';
 import { validParent, descendants, tabSpace as treeSpace } from './tab-tree.js';
-import { isNewTabUrl, navigationUrl } from './search.js';
+import { destinationKey, searchMemoryText, normalizeSearchMemory } from './search-ranking.js';
+import { isLauncherOrNewTab, isNewTabUrl, navigationUrl } from './search.js';
 import { COLORS, newId, sameUrl, isDrifted, isWebUrl, redactUrl } from './shared.js';
 
 const SETTLE_GRACE_MS = 1500;
 const ACTIVATION_RACE_MS = 300;
 const MAX_ALIASES = 4;
+const MAX_ARCHIVE = 500;
+const MAX_SEARCH_MEMORY = { searches: 50, selections: 100 };
 
 let config;
 let rt;
+let archive = []; // closed tabs, newest first (storage.local 'archive')
+// Last-known url/title per tab, so a tab closed from Chrome's own UI can still be archived.
+// Kept in memory and saved to storage.session only when it changes (debounced).
+const tabSnapshots = new Map();
 const lastActivation = new Map(); // windowId -> { prev, curr, at }
 const expectedRemovals = new Set(); // tabs we close ourselves (we pick the successor up front)
 const settling = new Map(); // tabId -> { completedAt } while a freshly opened pin may still redirect
@@ -31,13 +41,19 @@ const windowTypes = new Map();
 function defaultConfig() {
   return {
     version: 2,
-    folders: {},
-    archive: [],
     fresh: true,
     spaces: [{ id: newId(), name: 'Main', icon: '', color: 'blue', pins: [] }],
     essentials: [],
     pins: {},
-    settings: { collapseInactive: true, resetOnReclick: true, peekOnAltClick: true, peekInSplitView: false },
+    folders: {}, // id -> { id, name, spaceId, parentId, collapsed }
+    settings: {
+      collapseInactive: true,
+      resetOnReclick: true,
+      peekOnAltClick: true,
+      peekInSplitView: false,
+      searchHistory: true,
+      archiveClosedTabs: true,
+    },
   };
 }
 
@@ -47,56 +63,71 @@ function emptyRt() {
     groupSpace: {}, // groupId -> spaceId
     activeSpace: {}, // windowId -> spaceId
     lastSpace: null,
-    treeDetached: {}, // explicit root tabs; do not re-adopt their original Chrome opener
-    tabParent: {}, // child tab ID -> live parent tab ID
-    treeCollapsed: {}, // spaceId:tabId -> collapsed
     tabSpace: {}, // tabId -> spaceId (kept so we still know a tab's space in onRemoved)
-    commandSessions: {}, // tabId -> token and document identity for an open overlay
-    tabSnapshots: {}, // last known ordinary-tab data for native closes
     tabPin: {}, // tabId -> pinId
     mru: {}, // windowId -> [tabId, ...] most recent first
     peeks: {}, // peek popup windowId -> { tabId, parentWindowId, spaceId }
     tabPeeks: {}, // tab-based peek tabId -> { parentWindowId, returnTabId, split }
+    tabParent: {},
+    treeDetached: {},
+    treeCollapsed: {},
+    searches: {}, // launcher token -> { tabId, windowId, overlay } for an open search
   };
 }
 
 function normalizeConfig(c) {
   const cfg = c ?? defaultConfig();
   cfg.settings = { ...defaultConfig().settings, ...cfg.settings };
-  delete cfg.settings.peekFromEssentials; // Retire automatic Peek, including existing installs.
+  delete cfg.settings.peekFromEssentials;
   cfg.pins ??= {};
   cfg.essentials = (cfg.essentials ?? []).filter(id => cfg.pins[id]);
   if (!cfg.spaces?.length) cfg.spaces = defaultConfig().spaces;
   for (const s of cfg.spaces) s.pins = (s.pins ?? []).filter(id => cfg.pins[id]);
-  cfg.folders ??= {};
-  cfg.archive ??= [];
-  for (const [id, folder] of Object.entries(cfg.folders)) {
-    if (!cfg.spaces.some(s => s.id === folder.spaceId)) delete cfg.folders[id];
-  }
-  for (const folder of Object.values(cfg.folders)) {
-    const seen = new Set([folder.id]);
-    let parent = cfg.folders[folder.parentId];
-    while (parent) {
-      if (seen.has(parent.id) || parent.spaceId !== folder.spaceId) {
-        folder.parentId = null;
-        break;
-      }
-      seen.add(parent.id);
-      parent = cfg.folders[parent.parentId];
-    }
-    if (!cfg.folders[folder.parentId]) folder.parentId = null;
-  }
   for (const pin of Object.values(cfg.pins)) {
-    if (cfg.folders[pin.folderId]?.spaceId !== pin.spaceId) pin.folderId = null;
-  }
-  for (const pin of Object.values(cfg.pins)) {
-    pin.url = redactUrl(pin.url, { keepHash: true }) || pin.url;
     pin.lastUrl = pin.lastUrl && redactUrl(pin.lastUrl, { keepHash: true });
     pin.aliases = [...new Set((pin.aliases ?? []).map(url => redactUrl(url, { keepHash: true })).filter(Boolean))];
   }
-  cfg.archive = cfg.archive.map(entry => ({ ...entry, url: redactUrl(entry.url, { keepHash: true }) })).filter(entry => entry.url);
+  repairFolders(cfg);
   cfg.version = 2;
   return cfg;
+}
+
+// Folders may come from storage written by an older build or from an imported file, so make
+// them consistent: every folder belongs to an existing space, a parent is in the same space,
+// there are no cycles, and a pin's folder is in the pin's own space.
+function repairFolders(cfg) {
+  cfg.folders = cfg.folders && typeof cfg.folders === 'object' ? cfg.folders : {};
+  const spaceIds = new Set(cfg.spaces.map(s => s.id));
+  for (const [id, folder] of Object.entries(cfg.folders)) {
+    if (!folder || folder.id !== id || !spaceIds.has(folder.spaceId)) delete cfg.folders[id];
+  }
+  for (const folder of Object.values(cfg.folders)) {
+    const parent = cfg.folders[folder.parentId];
+    if (!parent || parent.spaceId !== folder.spaceId) folder.parentId = null;
+  }
+  // Break cycles: walk up from each folder; if we revisit one, detach the folder we started at.
+  for (const folder of Object.values(cfg.folders)) {
+    const seen = new Set([folder.id]);
+    for (let p = cfg.folders[folder.parentId]; p; p = cfg.folders[p.parentId]) {
+      if (seen.has(p.id)) {
+        folder.parentId = null;
+        break;
+      }
+      seen.add(p.id);
+    }
+  }
+  for (const pin of Object.values(cfg.pins)) {
+    const folder = cfg.folders[pin.folderId];
+    pin.folderId = folder && pin.spaceId != null && folder.spaceId === pin.spaceId ? pin.folderId : null;
+  }
+}
+
+// Archive entries only ever hold web pages, with sign-in parameters stripped.
+function normalizeArchive(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .map(e => ({ ...e, url: redactUrl(e?.url, { keepHash: true }), favIconUrl: isWebUrl(e?.favIconUrl) ? e.favIconUrl : '' }))
+    .filter(e => e.id && isWebUrl(e.url))
+    .slice(0, MAX_ARCHIVE);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -104,42 +135,58 @@ function normalizeConfig(c) {
 // never interleave, and state is flushed to storage once per task.
 
 let treeRestoreIdentity;
+const tabIdentities = new Map();
 let dirtyConfig = false;
 let dirtyRt = false;
+let dirtyArchive = false;
 const touchConfig = () => (dirtyConfig = true);
 const touchRt = () => (dirtyRt = true);
+const touchArchive = () => (dirtyArchive = true);
 
 async function flush() {
-  const notifyOverlays = dirtyConfig || dirtyRt;
   const writes = [];
   if (dirtyConfig) {
     dirtyConfig = false;
+    // peekOnAltClick is mirrored to its own key: peek-trigger.js runs on every site and reads
+    // only that, so your pinned URLs and names are never loaded into web pages.
     writes.push(chrome.storage.local.set({ config, peekOnAltClick: !!config.settings.peekOnAltClick }));
   }
   if (dirtyRt) {
     dirtyRt = false;
     writes.push(chrome.storage.session.set({ rt }));
     const ids = new Set([...Object.keys(rt.tabParent), ...Object.values(rt.tabParent).map(String), ...Object.keys(rt.treeDetached), ...Object.keys(rt.treeCollapsed).map(key => key.slice(key.lastIndexOf(':') + 1))]);
-    const identities = Object.fromEntries([...ids].filter(id => rt.tabSnapshots[id]).map(id => [id, { windowId: rt.tabSnapshots[id].windowId, url: rt.tabSnapshots[id].url }]));
+    const identities = Object.fromEntries([...ids].filter(id => tabIdentities.has(+id)).map(id => [id, tabIdentities.get(+id)]));
     writes.push(chrome.storage.local.set({ tabTreeState: { parents: rt.tabParent, detached: rt.treeDetached, collapsed: rt.treeCollapsed, identities } }));
   }
+  if (dirtyArchive) {
+    dirtyArchive = false;
+    writes.push(chrome.storage.local.set({ archive }));
+  }
   await Promise.all(writes);
-  if (notifyOverlays) broadcastOverlayRefresh();
 }
 
 const ready = (async () => {
-  const [{ config: c, searchMemory, tabTreeState }, { rt: r }] = await Promise.all([
-    chrome.storage.local.get(['config', 'searchMemory', 'tabTreeState']),
-    chrome.storage.session.get('rt'),
+  const [{ config: c, archive: a, searchMemory, tabTreeState }, { rt: r, tabSnapshots: snaps }] = await Promise.all([
+    chrome.storage.local.get(['config', 'archive', 'searchMemory', 'tabTreeState']),
+    chrome.storage.session.get(['rt', 'tabSnapshots']),
   ]);
-  if (searchMemory) await chrome.storage.local.set({ searchMemory: normalizeSearchMemory(searchMemory) });
+  const stored = JSON.stringify(c);
   config = normalizeConfig(c);
   rt = { ...emptyRt(), ...r };
+  if (searchMemory) await chrome.storage.local.set({ searchMemory: normalizeSearchMemory(searchMemory) });
   if (!r?.tabParent && tabTreeState) {
     rt.tabParent = tabTreeState.parents || {}; rt.treeCollapsed = tabTreeState.collapsed || {};
     rt.treeDetached = tabTreeState.detached || {}; treeRestoreIdentity = tabTreeState.identities || {};
   }
-  touchConfig(); // Persist schema migrations as well as first-run defaults.
+  // The previous development build kept closed tabs inside config. Merge once into
+  // upstream's separate archive key, preserving entries from either installation.
+  const legacyArchive = Array.isArray(config.archive) ? config.archive : [];
+  if ('archive' in config) { delete config.archive; touchConfig(); touchArchive(); }
+  if (!c || JSON.stringify(config) !== stored) touchConfig();
+  const entries = [...legacyArchive, ...(Array.isArray(a) ? a : [])];
+  archive = normalizeArchive([...new Map(entries.map(entry => [entry?.id, entry])).values()]
+    .sort((a, b) => (b?.closedAt || 0) - (a?.closedAt || 0)));
+  for (const [id, snap] of Object.entries(snaps ?? {})) if (!tabSnapshots.has(+id)) tabSnapshots.set(+id, snap);
   await chrome.storage.local.set({ peekOnAltClick: !!config.settings.peekOnAltClick });
   await reconcile().catch(e => console.error('[cove] reconcile failed', e));
   await flush();
@@ -313,6 +360,7 @@ function createPin(tab, spaceId, index) {
     favIconUrl: goodFavicon(tab.favIconUrl),
     aliases: [],
     spaceId,
+    folderId: null,
     lastUrl: redactUrl(url, { keepHash: true }),
   };
   insertAt(pinList(spaceId), id, index);
@@ -336,7 +384,7 @@ function unbindTab(tabId) {
 }
 
 // Tells peek-trigger.js (same isolated world) whether its tab is an Essential, so links to
-// other sites open in the current space while the Essential stays put. Re-sent on every
+// other sites open regular tabs in the current space. Re-sent on every
 // page load because the flag lives on the document.
 const essentialFlagged = new Set();
 function syncEssentialFlag(tabId) {
@@ -410,8 +458,8 @@ function parseSetup(data) {
       favIconUrl: goodFavicon(p.favIconUrl),
       aliases: (Array.isArray(p.aliases) ? p.aliases : []).filter(a => typeof a === 'string' && isWebUrl(a)).slice(0, MAX_ALIASES),
       spaceId: null,
-      folderId: str(p.folderId, 100) || null,
       lastUrl: typeof p.lastUrl === 'string' && IMPORTABLE_URL.test(p.lastUrl) ? p.lastUrl : p.url,
+      folderId: typeof p.folderId === 'string' ? p.folderId : null,
     };
   }
   const listed = new Set();
@@ -440,16 +488,22 @@ function parseSetup(data) {
     essentials.push(id);
   }
   for (const id of Object.keys(pins)) if (!listed.has(id)) delete pins[id];
-  const folders = Object.create(null);
-  for (const [id, folder] of Object.entries(c.folders && typeof c.folders === 'object' ? c.folders : {})) {
-    if (!folder || !spaces.some(space => space.id === folder.spaceId)) continue;
-    folders[id] = { id, spaceId: folder.spaceId, parentId: str(folder.parentId, 100) || null,
-      name: str(folder.name, 100).trim() || 'Folder', collapsed: folder.collapsed === true };
+  const folders = {};
+  for (const [id, f] of Object.entries(c.folders && typeof c.folders === 'object' ? c.folders : {})) {
+    if (typeof f?.spaceId !== 'string') continue;
+    folders[id] = {
+      id,
+      spaceId: f.spaceId,
+      parentId: typeof f.parentId === 'string' ? f.parentId : null,
+      name: str(f.name, 100).trim() || 'Folder',
+      collapsed: f.collapsed === true,
+    };
   }
   const settings = {};
   for (const key of Object.keys(defaultConfig().settings)) {
     if (typeof c.settings?.[key] === 'boolean') settings[key] = c.settings[key];
   }
+  // normalizeConfig -> repairFolders drops unknown spaces, cross-space parents and cycles.
   return normalizeConfig({ version: 2, spaces, essentials, pins, folders, settings });
 }
 
@@ -522,10 +576,9 @@ const handlers = {
     setWindowSpace(windowId, spaceId);
     const [cur] = await chrome.tabs.query({ windowId, active: true });
     if (!cur || tabSpaceOf(cur) !== spaceId) {
-      // An empty space gets its own native New Tab; later switches reuse it.
+      // An empty space just shows empty; we don't spawn a New Tab on every switch.
       const next = await pickSuccessor(windowId, spaceId);
       if (next) await safe(() => chrome.tabs.update(next.id, { active: true }));
-      else await createTabInSpace(windowId, spaceId);
     }
     await applyCollapse(windowId);
   },
@@ -592,7 +645,7 @@ const handlers = {
     }
     if (doomed.length) await safe(() => chrome.tabs.remove(doomed.map(t => t.id))).catch(() => {});
     for (const pid of s.pins) delete config.pins[pid];
-    for (const [id, folder] of Object.entries(config.folders)) if (folder.spaceId === spaceId) delete config.folders[id];
+    for (const [fid, f] of Object.entries(config.folders)) if (f.spaceId === spaceId) delete config.folders[fid];
     config.spaces.splice(config.spaces.indexOf(s), 1);
     for (const [gid, sid] of Object.entries(rt.groupSpace)) if (sid === spaceId) delete rt.groupSpace[gid];
     if (rt.lastSpace === spaceId) rt.lastSpace = fallback.id;
@@ -612,36 +665,32 @@ const handlers = {
   },
 
   async closeTabs({ windowId, tabIds }) {
-    const live = (await chrome.tabs.query({ windowId })).filter(t => tabIds.includes(t.id));
-    if (!live.length) return;
-    const snapshots = live.filter(t => !t.pinned && !rt.tabPin[t.id] && !isPeekTab(t.id)).map(snapshotTab);
-    const ids = live.map(t => t.id);
-    const active = live.find(t => t.active);
-    for (const id of ids) expectedRemovals.add(id);
-    try {
-      if (active) {
-        const spaceId = active.pinned ? windowSpace(windowId) : tabSpaceOf(active) ?? windowSpace(windowId);
-        const next = await pickSuccessor(windowId, spaceId, active.id);
-        if (next) await safe(() => chrome.tabs.update(next.id, { active: true }));
-        else if (!active.pinned) await createTabInSpace(windowId, spaceId);
-      }
-      await safe(() => chrome.tabs.remove(ids));
-    } finally {
-      // Preserve recovery even if Chrome partially closes a batch before reporting an error.
-      const remaining = new Set((await chrome.tabs.query({ windowId }).catch(() => [])).map(t => t.id));
-      archiveTabs(snapshots.filter(t => !remaining.has(t.tabId)));
-      for (const id of ids) if (remaining.has(id)) expectedRemovals.delete(id);
+    const tabs = (await chrome.tabs.query({ windowId })).filter(t => tabIds.includes(t.id));
+    const active = tabs.find(t => t.active);
+    for (const id of tabIds) expectedRemovals.add(id);
+    if (active) {
+      // Pick the successor ourselves before Chrome does, so there's no flash of another space.
+      const spaceId = active.pinned ? windowSpace(windowId) : tabSpaceOf(active) ?? windowSpace(windowId);
+      const next = await pickSuccessor(windowId, spaceId, active.id);
+      if (next) await safe(() => chrome.tabs.update(next.id, { active: true }));
+      else if (!active.pinned) await createTabInSpace(windowId, spaceId);
     }
+    await safe(() => chrome.tabs.remove(tabIds)).catch(() => {});
+    // One close (a single tab, or Clear) is one archive batch, so Undo brings all of it back.
+    const gone = new Set(tabIds);
+    for (const t of await chrome.tabs.query({ windowId }).catch(() => [])) gone.delete(t.id);
+    archiveTabs(tabs.filter(t => gone.has(t.id) && archivable(t)).map(snapshotTab), { notify: true });
   },
 
   async clearSpace({ windowId, spaceId }) {
     const tabs = await chrome.tabs.query({ windowId });
-    const tabIds = tabs.filter(t => tabSpaceOf(t) === spaceId && !t.active && !t.pinned && !rt.tabPin[t.id]).map(t => t.id);
+    const tabIds = tabs.filter(t => tabSpaceOf(t) === spaceId && !rt.tabPin[t.id] && !t.active).map(t => t.id);
     if (tabIds.length) await handlers.closeTabs({ windowId, tabIds });
   },
 
-  // Zen behaviour: click a pin to switch to it; click it again while it's active and has
+  // Click a pin to switch to it; click it again while it's active and has
   // navigated away to send it back to its pinned URL.
+  // `reset: false` (used by search and "Open all tabs") only switches, never resets.
   async openPin({ windowId, pinId, reset = true }) {
     const pin = config.pins[pinId];
     if (!pin) return;
@@ -683,30 +732,28 @@ const handlers = {
   async pinTab({ tabId, spaceId = null, index, folderId = null }) {
     const tab = await getTab(tabId);
     if (!tab || (spaceId != null && !spaceById(spaceId))) return;
+    validateFolder(folderId, spaceId);
     const existing = rt.tabPin[tabId];
     if (existing && config.pins[existing]) return handlers.movePin({ pinId: existing, spaceId, index, folderId });
-    validateFolder(folderId, spaceId);
     delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchRt();
     const pin = createPin(tab, spaceId, index);
     pin.folderId = folderId;
     bindTab(tabId, pin.id);
     await placePinTab(tab, spaceId);
-    if (tab.active) revealPinFolders(pin.id);
   },
 
+  // `folderId` is the pin's folder after the move (null = top level of the space).
   async movePin({ pinId, spaceId = null, index, folderId = null }) {
     const pin = config.pins[pinId];
     if (!pin || !pinList(spaceId)) return;
     validateFolder(folderId, spaceId);
-    pin.folderId = folderId;
     detachPin(pinId);
     insertAt(pinList(spaceId), pinId, index);
     const changed = pin.spaceId !== spaceId;
     pin.spaceId = spaceId;
+    pin.folderId = folderId;
     touchConfig();
-    const bound = await boundTabs(pinId);
-    if (changed) { for (const t of bound) await placePinTab(t, spaceId); await pruneTabTree(); }
-    if (bound.some(t => t.active)) revealPinFolders(pinId);
+    if (changed) for (const t of await boundTabs(pinId)) await placePinTab(t, spaceId);
   },
 
   // Remove the pin but keep its tab(s) open as regular tabs. With `place`, the tab in
@@ -769,7 +816,6 @@ const handlers = {
       return handlers.unpin({ pinId, windowId: tab.windowId, spaceId, beforeTabId, place: true });
     }
     if (tab.pinned || tabSpaceOf(tab) !== spaceId) await putTabInSpace(tab, spaceId);
-    await pruneTabTree();
     tab = await getTab(tabId);
     if (!tab) return;
     const groupId = tab.groupId;
@@ -787,14 +833,16 @@ const handlers = {
       if (moved && moved.groupId !== groupId) await safe(() => chrome.tabs.group({ tabIds: [tabId], groupId }));
     }
     if (tab.active) setWindowSpace(tab.windowId, spaceId);
+    await pruneTabTree();
     collapseSoon(tab.windowId);
   },
 
+  // The archive and search memory are local history, not setup, so they aren't exported.
   exportConfig() {
     const { spaces, essentials, pins, folders, settings } = config;
     return {
       format: SETUP_FORMAT,
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       config: normalizeConfig(structuredClone({ spaces, essentials, pins, folders, settings })),
     };
@@ -804,9 +852,7 @@ const handlers = {
   // tabs: groups are matched to spaces by name and tabs re-bound to pins by URL, exactly like
   // after a browser restart. This is also how a setup moves between installs.
   async importConfig({ data }) {
-    const imported = parseSetup(data);
-    imported.archive = config.archive;
-    config = imported;
+    config = parseSetup(data);
     touchConfig();
     rt = emptyRt();
     touchRt();
@@ -817,10 +863,9 @@ const handlers = {
   },
 
   async updateSettings({ patch }) {
-    const { peekFromEssentials: retired, ...settings } = patch;
-    Object.assign(config.settings, settings);
+    Object.assign(config.settings, patch);
     touchConfig();
-    if ('peekOnAltClick' in settings) broadcastPeekPrefs();
+    if ('peekOnAltClick' in patch) broadcastPeekPrefs();
     if (!('collapseInactive' in patch)) return;
     if (patch.collapseInactive) {
       for (const w of await chrome.windows.getAll({ windowTypes: ['normal'] })) await applyCollapse(w.id);
@@ -832,118 +877,157 @@ const handlers = {
   },
 };
 
-// Reveal a pin when it is selected, including all nested ancestors. Explicit
-// manual collapses remain possible until the tab is selected again.
+// ---------------------------------------------------------------------------------------
+// Folders: nested groups of a space's pinned tabs. Adapted from a contribution by Julio
+// Orozco (drewcoble/cove#1).
+
+function validateFolder(folderId, spaceId) {
+  if (folderId == null) return;
+  const folder = config.folders[folderId];
+  if (!folder || spaceId == null || folder.spaceId !== spaceId) throw new Error('Choose a folder in the same space.');
+}
+
+// The folder and every folder nested inside it.
+function folderSubtree(folderId) {
+  const ids = new Set([folderId]);
+  let size;
+  do {
+    size = ids.size;
+    for (const f of Object.values(config.folders)) if (ids.has(f.parentId)) ids.add(f.id);
+  } while (ids.size !== size);
+  return ids;
+}
+
+// Opening a pin expands every folder above it, so the selected row is visible.
 function revealPinFolders(pinId) {
   const pin = config.pins[pinId];
-  if (!pin || pin.spaceId == null) return;
   const seen = new Set();
-  let folder = config.folders[pin.folderId];
-  while (folder && folder.spaceId === pin.spaceId && !seen.has(folder.id)) {
-    seen.add(folder.id);
-    if (folder.collapsed) {
-      folder.collapsed = false;
+  for (let f = config.folders[pin?.folderId]; f && !seen.has(f.id); f = config.folders[f.parentId]) {
+    seen.add(f.id);
+    if (f.collapsed) {
+      f.collapsed = false;
       touchConfig();
     }
-    folder = config.folders[folder.parentId];
   }
-}
-
-// Folders only organize saved pins; Chrome groups remain one per space.
-function validateFolder(folderId, spaceId) {
-  if (folderId != null && (!config.folders[folderId] || config.folders[folderId].spaceId !== spaceId)) {
-    throw new Error('Choose a folder in the same space.');
-  }
-}
-
-function snapshotTab(tab) {
-  return { tabId: tab.id, parentTabId: rt.tabParent[tab.id] ?? null, parentPinId: rt.tabPin[rt.tabParent[tab.id]] ?? null, windowId: tab.windowId, spaceId: tabSpaceOf(tab),
-    url: redactUrl(tab.pendingUrl || tab.url, { keepHash: true }), title: tab.title || '', index: tab.index,
-    favIconUrl: goodFavicon(tab.favIconUrl), active: tab.active };
-}
-
-function rememberTab(tab) {
-  rt.tabSnapshots[tab.id] = snapshotTab(tab);
-  touchRt();
-}
-
-function archiveTabs(snapshots) {
-  const batchId = newId();
-  const closedAt = Date.now();
-  const entries = snapshots.filter(t => !isNewTabUrl(t.url, chrome.runtime.getURL('')) && /^(https?:|file:|chrome:|about:)/i.test(t.url) &&
-    !t.url.startsWith(chrome.runtime.getURL(''))).map(t => ({ ...t, id: newId(), batchId, closedAt }));
-  if (!entries.length) return;
-  config.archive.unshift(...entries);
-  config.archive = config.archive.slice(0, 500);
-  touchConfig();
 }
 
 Object.assign(handlers, {
   async createFolder({ spaceId, name, parentId = null }) {
-    if (!spaceById(spaceId)) throw new Error('Space no longer exists.');
+    if (!spaceById(spaceId)) throw new Error('That space no longer exists.');
     validateFolder(parentId, spaceId);
     const id = newId();
-    config.folders[id] = { id, spaceId, parentId, name: name?.trim() || 'New folder', collapsed: false };
+    config.folders[id] = { id, spaceId, parentId, name: name?.trim().slice(0, 100) || 'New folder', collapsed: false };
     touchConfig();
     return id;
   },
+
+  // `parentId: undefined` leaves the parent alone; null moves the folder to the top level.
   async updateFolder({ folderId, name, collapsed, parentId }) {
     const folder = config.folders[folderId];
     if (!folder) return;
     if (parentId !== undefined) {
       validateFolder(parentId, folder.spaceId);
-      let cursor = parentId;
-      while (cursor != null) {
-        if (cursor === folderId) throw new Error('A folder cannot contain itself.');
-        cursor = config.folders[cursor]?.parentId;
-      }
+      if (parentId != null && folderSubtree(folderId).has(parentId)) throw new Error('A folder can’t go inside itself.');
       folder.parentId = parentId;
     }
-    if (name?.trim()) folder.name = name.trim();
+    if (name?.trim()) folder.name = name.trim().slice(0, 100);
     if (typeof collapsed === 'boolean') folder.collapsed = collapsed;
     touchConfig();
   },
+
+  // Removing a folder keeps its pins and subfolders; they move up one level.
   async deleteFolder({ folderId }) {
     const folder = config.folders[folderId];
     if (!folder) return;
-    // Removing a folder keeps every pin and child folder.
     for (const pin of Object.values(config.pins)) if (pin.folderId === folderId) pin.folderId = folder.parentId;
     for (const child of Object.values(config.folders)) if (child.parentId === folderId) child.parentId = folder.parentId;
     delete config.folders[folderId];
     touchConfig();
   },
+
+  // Opens every pin in the folder and its subfolders without resetting ones you navigated.
   async openFolder({ windowId, folderId }) {
     const folder = config.folders[folderId];
     if (!folder) return;
-    const descendants = new Set([folderId]);
-    let size;
-    do {
-      size = descendants.size;
-      for (const f of Object.values(config.folders)) if (descendants.has(f.parentId)) descendants.add(f.id);
-    } while (size !== descendants.size);
+    const inside = folderSubtree(folderId);
     for (const id of spaceById(folder.spaceId).pins) {
-      if (descendants.has(config.pins[id]?.folderId)) await handlers.openPin({ windowId, pinId: id, reset: false });
+      if (inside.has(config.pins[id]?.folderId)) await handlers.openPin({ windowId, pinId: id, reset: false });
     }
     await handlers.switchSpace({ windowId, spaceId: folder.spaceId });
   },
+});
+
+// ---------------------------------------------------------------------------------------
+// Archive: closed tabs you can search and restore. Adapted from a contribution by Julio
+// Orozco (drewcoble/cove#1). Pinned tabs, Essentials, Peeks, closed windows and deleted
+// spaces aren't archived; only web pages are kept, with sign-in parameters stripped.
+
+const archivable = tab => !tab.pinned && !rt.tabPin[tab.id] && !isPeekTab(tab.id);
+
+function snapshotTab(tab) {
+  return {
+    tabId: tab.id, parentTabId: rt.tabParent[tab.id] ?? null, parentPinId: rt.tabPin[rt.tabParent[tab.id]] ?? null,
+    url: redactUrl(tab.pendingUrl || tab.url, { keepHash: true }),
+    title: tab.title || '',
+    favIconUrl: isWebUrl(tab.favIconUrl) ? tab.favIconUrl : '',
+    windowId: tab.windowId,
+    spaceId: tabSpaceOf(tab),
+    active: !!tab.active,
+  };
+}
+
+let snapshotTimer;
+function saveSnapshotsSoon() {
+  clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(() => chrome.storage.session.set({ tabSnapshots: Object.fromEntries(tabSnapshots) }), 1500);
+}
+function forgetTab(tabId) {
+  if (tabSnapshots.delete(tabId)) saveSnapshotsSoon();
+}
+// Called straight from tabs.onUpdated (not through the queue): only url/title/favicon
+// changes matter, and nothing is written unless one of them actually changed.
+function rememberTab(tab) {
+  tabIdentities.set(tab.id, { windowId: tab.windowId, url: redactUrl(tab.pendingUrl || tab.url, { keepHash: true }) });
+  const url = redactUrl(tab.pendingUrl || tab.url, { keepHash: true });
+  if (tab.pinned || !isWebUrl(url)) return forgetTab(tab.id);
+  const old = tabSnapshots.get(tab.id);
+  const favIconUrl = isWebUrl(tab.favIconUrl) ? tab.favIconUrl : old?.favIconUrl || '';
+  const title = tab.title || old?.title || '';
+  if (old && old.url === url && old.title === title && old.favIconUrl === favIconUrl) return;
+  tabSnapshots.set(tab.id, { url, title, favIconUrl });
+  saveSnapshotsSoon();
+}
+
+function archiveTabs(snapshots, { notify = false } = {}) {
+  if (!config.settings.archiveClosedTabs) return;
+  const batchId = newId();
+  const closedAt = Date.now();
+  const entries = snapshots.filter(s => isWebUrl(s.url)).map(s => ({ ...s, id: newId(), batchId, closedAt }));
+  if (!entries.length) return;
+  archive = [...entries, ...archive].slice(0, MAX_ARCHIVE);
+  touchArchive();
+  if (notify) {
+    chrome.runtime.sendMessage({ target: 'panel', type: 'archived', windowId: entries[0].windowId, count: entries.length }).catch(() => {});
+  }
+}
+
+Object.assign(handlers, {
   async restoreArchive({ windowId, entryIds }) {
-    const entries = [...new Set(entryIds)].map(id => config.archive.find(e => e.id === id)).filter(Boolean);
-    const restored = [];
-    const treeEntries = [];
+    const entries = [...new Set(entryIds)].map(id => archive.find(e => e.id === id)).filter(Boolean);
     let focus = null;
+    const treeEntries = [];
     for (const entry of entries) {
       const spaceId = spaceById(entry.spaceId) ? entry.spaceId : windowSpace(windowId);
       const tab = await createTabInSpace(windowId, spaceId, { url: entry.url, active: false });
-      // Consume each entry only after its tab was successfully created and grouped.
-      config.archive = config.archive.filter(e => e.id !== entry.id);
-      touchConfig();
-      restored.push(tab.id);
+      // Remove each entry only once its tab exists, so a failure keeps the rest restorable.
+      archive = archive.filter(e => e.id !== entry.id);
+      touchArchive();
       treeEntries.push({ entry, tab });
       if (entry.active || !focus) focus = { tab, spaceId };
     }
     const restoredIds = new Map(treeEntries.map(({ entry, tab }) => [entry.tabId, tab.id]));
     for (const { entry, tab } of treeEntries) {
-      const parentId = restoredIds.get(entry.parentTabId) || (entry.parentPinId && (await boundTab(entry.parentPinId, windowId))?.id) || entry.parentTabId;
+      const parentId = restoredIds.get(entry.parentTabId) ?? (entry.parentPinId ? (await boundTab(entry.parentPinId, windowId))?.id : entry.windowId === windowId ? entry.parentTabId : null);
       const parent = parentId != null ? await getTab(parentId) : null;
       if (validParent(tab, parent, rt)) rt.tabParent[tab.id] = parent.id;
     }
@@ -951,247 +1035,204 @@ Object.assign(handlers, {
     if (focus) {
       revealTabParents(focus.tab);
       setWindowSpace(windowId, focus.spaceId);
-      await chrome.tabs.update(focus.tab.id, { active: true });
+      await safe(() => chrome.tabs.update(focus.tab.id, { active: true }));
       await applyCollapse(windowId);
     }
-    return restored;
+    return entries.length;
   },
+
+  // Restores this window's most recent close (a whole Clear comes back together).
   async undoArchive({ windowId }) {
-    const latest = config.archive.find(e => e.windowId === windowId);
-    if (!latest) return [];
-    return handlers.restoreArchive({ windowId, entryIds: config.archive.filter(e => e.batchId === latest.batchId).map(e => e.id) });
+    const latest = archive.find(e => e.windowId === windowId);
+    if (!latest) return 0;
+    return handlers.restoreArchive({ windowId, entryIds: archive.filter(e => e.batchId === latest.batchId).map(e => e.id) });
   },
-  async deleteArchive({ entryId }) {
-    config.archive = config.archive.filter(e => e.id !== entryId);
-    touchConfig();
+
+  async deleteArchive({ entryIds }) {
+    const drop = new Set(entryIds);
+    archive = archive.filter(e => !drop.has(e.id));
+    touchArchive();
+  },
+
+  async clearArchive() {
+    archive = [];
+    touchArchive();
+  },
+
+  async clearSearchMemory() {
+    await chrome.storage.local.remove('searchMemory');
   },
 });
 
-async function searchContext(tab) {
-  const [history, stored] = await Promise.all([
-    chrome.history.search({ text: '', startTime: Date.now() - 90 * 86400000, maxResults: 2000 }).catch(() => []),
-    chrome.storage.local.get('searchMemory'),
-  ]);
-  return { history: history.filter(entry => /^https?:\/\//i.test(entry.url)).map(entry => ({ ...entry, url: redactUrl(entry.url, { keepHash: true }) })).filter(entry => entry.url),
-    memory: stored.searchMemory || {}, config, rt: { tabPin: rt.tabPin, tabSpace: rt.tabSpace, groupSpace: rt.groupSpace, mru: rt.mru, activeSpace: rt.activeSpace },
-    tabs: await chrome.tabs.query({ windowId: tab.windowId }), windowId: tab.windowId, tabId: tab.id,
-    spaceId: windowSpace(tab.windowId) };
-}
+// ---------------------------------------------------------------------------------------
+// Search. Adapted from a contribution by Julio Orozco (drewcoble/cove#1).
+//
+// The launcher is an extension page (src/launcher.html) that reads tabs, pins, the archive
+// and history itself, so none of that ever enters a web page. On an ordinary page it shows
+// in a frame on top of the page: src/overlay-host.js is injected only when you open search
+// (so a site's own Cmd/Ctrl+K keeps working), and a page can't read a cross-origin extension
+// frame or the keys typed into it. Where nothing can be injected (chrome:// pages, the Web
+// Store, PDFs) the launcher opens as a tab instead. Each opening gets a one-time token; a
+// launcher without a live token, such as one a page embedded on its own, shows nothing.
 
-async function rememberSearch({ kind, id, text, query, chosenUrl }) {
-  if (['navigate', 'search', 'tab', 'pin'].includes(kind)) {
-    const stored = await chrome.storage.local.get('searchMemory');
-    const searchMemory = normalizeSearchMemory(stored.searchMemory);
-    const now = Date.now();
-    const typed = searchMemoryText(query).toLocaleLowerCase();
-    const searches = searchMemory.searches || [];
-    if (kind === 'search' || (kind === 'navigate' && !navigationUrl(text || ''))) {
-      const phrase = searchMemoryText(text);
-      const previous = searches.find(entry => entry.text.toLocaleLowerCase() === phrase.toLocaleLowerCase());
-      searchMemory.searches = [{ text: phrase, count: (previous?.count || 0) + 1, lastUsed: now },
-        ...searches.filter(entry => entry !== previous)].slice(0, 50);
-    }
-    if (typed) {
-      const key = kind === 'pin' ? `pin-${id}` : chosenUrl ? destinationKey(searchMemoryText(chosenUrl)) : `search-${searchMemoryText(text).toLocaleLowerCase()}`;
-      const selections = searchMemory.selections || [];
-      const previous = selections.find(entry => entry.query === typed && entry.key === key);
-      searchMemory.selections = [{ query: typed, key, count: (previous?.count || 0) + 1, lastUsed: now },
-        ...selections.filter(entry => entry !== previous)].slice(0, 100);
-    }
-    await chrome.storage.local.set({ searchMemory });
-  }
-}
+const LAUNCHER = 'src/launcher.html';
 
-// New Tab commands run in the worker so switching away can safely close the
-// launcher after activation, even when its page is no longer running.
-async function launcherTab(tabId) {
-  const tab = await getTab(tabId);
-  if (!tab || !isNewTabUrl(tab.pendingUrl || tab.url, chrome.runtime.getURL(''))) {
-    throw new Error('This New Tab page is no longer available.');
-  }
-  return tab;
-}
-
-async function dismissLauncher(tab, target) {
-  if (!target || target.id === tab.id || target.windowId !== tab.windowId) return false;
-  const spaceId = tabSpaceOf(target);
-  if (spaceId) setWindowSpace(tab.windowId, spaceId);
-  await safe(() => chrome.tabs.update(target.id, { active: true }));
-  await applyCollapse(tab.windowId);
-  // A delayed result must never close a page the user has since navigated to.
+// One of our extension pages (not a content script, whose url is the web page's). Compared
+// by protocol and path because launcher.html is web-accessible with use_dynamic_url, so its
+// address can use either the extension id or the per-session dynamic id.
+function extensionPagePath(sender) {
   try {
-    const current = await launcherTab(tab.id);
-    if (current.pinned || rt.tabPin[current.id]) return false;
-  } catch { return false; }
-  expectedRemovals.add(tab.id);
-  try { await safe(() => chrome.tabs.remove(tab.id)); }
-  catch (error) { expectedRemovals.delete(tab.id); throw error; }
-  return true;
-}
-
-Object.assign(handlers, {
-  async newTabContext({ tabId }) {
-    const tab = await launcherTab(tabId);
-    const spaceId = tabSpaceOf(tab) || windowSpace(tab.windowId);
-    const previous = (rt.mru[tab.windowId] || []).find(id => id !== tab.id);
-    return { tabId: tab.id, windowId: tab.windowId, spaceId, previousTabId: previous ?? null };
-  },
-  async newTabSearchContext({ tabId }) {
-    return searchContext(await launcherTab(tabId));
-  },
-  async navigateNewTab({ tabId, text, query: typedQuery, forceSearch = false }) {
-    const tab = await launcherTab(tabId);
-    const query = text?.trim();
-    if (!query) return;
-    const url = forceSearch ? null : navigationUrl(query);
-    // Reuse the launcher tab, including its space and position in the group.
-    if (url) await safe(() => chrome.tabs.update(tab.id, { url }));
-    else await chrome.search.query({ text: query, tabId: tab.id });
-    await rememberSearch({ kind: url ? 'navigate' : 'search', text: query, query: typedQuery ?? query, chosenUrl: url });
-  },
-  async selectNewTabResult({ tabId, kind, id, query }) {
-    const tab = await launcherTab(tabId);
-    let target;
-    if (kind === 'tab') {
-      target = await getTab(id);
-      if (!target || target.windowId !== tab.windowId) throw new Error('That tab has closed. Search again.');
-    } else if (kind === 'pin') {
-      if (!config.pins[id]) throw new Error('That pin has been removed.');
-      await handlers.openPin({ windowId: tab.windowId, pinId: id, reset: false });
-      target = await boundTab(id, tab.windowId);
-    } else if (kind === 'space') {
-      if (!spaceById(id)) throw new Error('That space has been removed.');
-      target = await pickSuccessor(tab.windowId, id, tab.id);
-      if (!target) {
-        // An empty space keeps this launcher, ready to open a URL there.
-        if (!tab.pinned && !rt.tabPin[tab.id]) await putTabInSpace(tab, id);
-        setWindowSpace(tab.windowId, id);
-        await applyCollapse(tab.windowId);
-        return false;
-      }
-    } else if (kind === 'archive') {
-      const restored = await handlers.restoreArchive({ windowId: tab.windowId, entryIds: [id] });
-      if (!restored.length) throw new Error('That tab has already been restored.');
-      target = await getTab(restored[0]);
-    } else throw new Error('Unknown search result.');
-    await rememberSearch({ kind, id, query, chosenUrl: kind === 'pin' ? config.pins[id]?.url : target?.url });
-    return dismissLauncher(tab, target);
-  },
-  async dismissNewTab({ tabId, previousTabId }) {
-    const tab = await launcherTab(tabId);
-    let target = previousTabId != null ? await getTab(previousTabId) : null;
-    if (!target || target.windowId !== tab.windowId || target.id === tab.id) {
-      target = await pickSuccessor(tab.windowId, tabSpaceOf(tab), tab.id);
-    }
-    return dismissLauncher(tab, target);
-  },
-});
-
-// Only these scoped commands are exposed to the isolated overlay content script.
-// Its token is kept in extension session storage and in the isolated world, never in page DOM.
-async function openCommandOverlay(tab) {
-  if ((tab.pendingUrl || tab.url || '').split(/[?#]/)[0] === chrome.runtime.getURL('src/newtab.html')) {
-    await chrome.tabs.update(tab.id, { active: true });
-    chrome.runtime.sendMessage({ target: 'newtab', type: 'focusSearch', tabId: tab.id }).catch(() => {});
-    return { newTab: true };
-  }
-  try {
-    // Sidebar clicks can leave keyboard focus outside the page. Activate the target
-    // before opening/refocusing its panel; the isolated UI then focuses its window.
-    await chrome.tabs.update(tab.id, { active: true });
-    const [{ documentId }] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ['src/command-overlay.js'] });
-    const [{ result: opened }] = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: () => {
-      if (!globalThis.__coveCommandOverlay?.isOpen()) return false;
-      globalThis.__coveCommandOverlay.focus();
-      return true;
-    } });
-    if (opened && rt.commandSessions[tab.id]?.documentId === documentId) return { overlay: true };
-    const token = crypto.randomUUID();
-    rt.commandSessions[tab.id] = { token, documentId };
-    touchRt();
-    // Do not await the UI's context request while holding the serialized worker queue.
-    await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, func: token => {
-      globalThis.__coveCommandOverlay.open(token).catch(() => {});
-    }, args: [token] });
-    return { overlay: true };
+    const u = new URL(sender?.url);
+    return sender.id === chrome.runtime.id && u.protocol === 'chrome-extension:' ? u.pathname : null;
   } catch {
-    delete rt.commandSessions[tab.id];
-    touchRt();
-    // Restricted pages use a dedicated search page, never a New Tab override.
-    await handlers.newTab({ windowId: tab.windowId, spaceId: windowSpace(tab.windowId), url: chrome.runtime.getURL('src/newtab.html') });
-    return { newTab: true };
+    return null;
   }
 }
 
-async function overlaySource(token, sender) {
-  const session = rt.commandSessions[sender.tab?.id];
-  if (!session || session.token !== token || session.documentId !== sender.documentId || sender.frameId !== 0) {
-    throw new Error('This search panel has closed. Press Command+K to open it again.');
+function searchSession(token, sender) {
+  const session = token && rt.searches[token];
+  const fromLauncher = extensionPagePath(sender) === '/' + LAUNCHER;
+  const tabId = sender?.tab?.id;
+  const ok = session && fromLauncher &&
+    (session.overlay ? tabId === session.tabId && sender.frameId !== 0 : tabId === session.launcherTabId);
+  if (!ok) throw new Error('This search has closed. Open it again.');
+  return session;
+}
+
+async function closeSearch(token) {
+  const session = rt.searches[token];
+  if (!session) return;
+  delete rt.searches[token];
+  touchRt();
+  if (session.overlay) {
+    await chrome.tabs.sendMessage(session.tabId, { type: 'coveCloseSearch' }, { frameId: 0 }).catch(() => {});
+    return;
   }
-  const tab = await getTab(sender.tab.id);
-  if (!tab) throw new Error('This tab has closed.');
-  return tab;
+  const launcherTab = await getTab(session.launcherTabId);
+  if (!launcherTab) return;
+  expectedRemovals.add(launcherTab.id);
+  if (launcherTab.active && (await getTab(session.returnTabId))) {
+    await safe(() => chrome.tabs.update(session.returnTabId, { active: true })).catch(() => {});
+  }
+  await chrome.tabs.remove(launcherTab.id).catch(() => expectedRemovals.delete(launcherTab.id));
+}
+
+async function rememberSearchChoice({ kind, id, text, query, url }) {
+  if (!config.settings.searchHistory) return;
+  const stored = await chrome.storage.local.get('searchMemory');
+  const memory = normalizeSearchMemory(stored.searchMemory);
+  const now = Date.now();
+  if (kind === 'search' && text?.trim()) {
+    const phrase = searchMemoryText(text);
+    const searches = (memory.searches || []).filter(e => e.text.toLocaleLowerCase() !== phrase.toLocaleLowerCase());
+    const previous = (memory.searches || []).find(e => e.text.toLocaleLowerCase() === phrase.toLocaleLowerCase());
+    memory.searches = [{ text: phrase, count: (previous?.count || 0) + 1, lastUsed: now }, ...searches].slice(0, MAX_SEARCH_MEMORY.searches);
+  }
+  const typed = typeof query === 'string' ? searchMemoryText(query).toLocaleLowerCase() : '';
+  if (typed && !typed.startsWith('>')) {
+    const key = kind === 'pin' ? `pin-${id}` : url ? destinationKey(searchMemoryText(url)) : `search-${searchMemoryText(text).toLocaleLowerCase()}`;
+    const previous = (memory.selections || []).find(e => e.query === typed && e.key === key);
+    const rest = (memory.selections || []).filter(e => e !== previous);
+    memory.selections = [{ query: typed, key, count: (previous?.count || 0) + 1, lastUsed: now }, ...rest].slice(0, MAX_SEARCH_MEMORY.selections);
+  }
+  await chrome.storage.local.set({ searchMemory: memory });
 }
 
 Object.assign(handlers, {
-  async openCommandOverlay({ tabId }, sender) {
-    // Content scripts can only open the overlay on their own tab, even from a nested frame.
-    const id = sender.url?.startsWith(chrome.runtime.getURL('')) ? tabId ?? sender.tab?.id : sender.tab?.id;
-    const tab = await getTab(id);
-    if (!tab || !(await isNormalWindow(tab.windowId))) return;
-    return openCommandOverlay(tab);
-  },
-  async commandContext({ token }, sender) {
-    const tab = await overlaySource(token, sender);
-    return searchContext(tab);
-  },
-  async closeCommandOverlay({ token }, sender) {
-    await overlaySource(token, sender);
-    delete rt.commandSessions[sender.tab.id];
+  // Opens search over the active tab of `windowId`, or closes it if it's already open there.
+  async openSearch({ windowId, mode = 'all' }) {
+    const [tab] = await chrome.tabs.query({ windowId, active: true });
+    if (!tab) return;
+    const open = Object.entries(rt.searches).find(([, s]) => s.tabId === tab.id || s.launcherTabId === tab.id);
+    if (open) return closeSearch(open[0]);
+    for (const [token, s] of Object.entries(rt.searches)) if (s.windowId === windowId) await closeSearch(token);
+    const token = newId() + newId();
+    const session = { tabId: tab.id, windowId, overlay: true, mode: mode === 'archive' ? 'archive' : 'all' };
+    rt.searches[token] = session;
     touchRt();
+    const page = tab.pendingUrl || tab.url || '';
+    try {
+      if (isLauncherOrNewTab(page, chrome.runtime.getURL(''))) throw new Error('use a tab');
+      await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ['src/overlay-host.js'] });
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id, frameIds: [0] },
+        func: (t, m) => globalThis.__coveSearch?.open(t, m) === true,
+        args: [token, session.mode],
+      });
+      if (!result) throw new Error('overlay unavailable');
+    } catch {
+      session.overlay = false;
+      session.returnTabId = tab.id;
+      const spaceId = windowSpace(windowId);
+      const hash = new URLSearchParams({ token, mode: session.mode, view: 'tab' });
+      const launcherTab = await createTabInSpace(windowId, spaceId, { url: chrome.runtime.getURL(`${LAUNCHER}#${hash}`) });
+      session.launcherTabId = launcherTab.id;
+      touchRt();
+    }
   },
-  async commandAction({ token, kind, id, text, query }, sender) {
-    const tab = await overlaySource(token, sender);
-    const windowId = tab.windowId;
+
+  async launcherHello({ token }, sender) {
+    const session = searchSession(token, sender);
+    return { windowId: session.windowId, sourceTabId: session.tabId, spaceId: windowSpace(session.windowId), mode: session.mode };
+  },
+
+  async launcherClose({ token }, sender) {
+    searchSession(token, sender);
+    await closeSearch(token);
+  },
+
+  // Everything a launcher result can do. Archive deletes and new folders keep search open;
+  // everything else closes it.
+  async launcherAction({ token, kind, id, text, query }, sender) {
+    const { windowId } = searchSession(token, sender);
     const spaceId = windowSpace(windowId);
-    let chosenUrl;
-    if (kind === 'navigate' || kind === 'search') {
-      const query = text?.trim();
-      if (!query) return;
-      const url = kind === 'search' ? undefined : navigationUrl(query) || undefined;
-      chosenUrl = url;
-      const target = await handlers.newTab({ windowId, spaceId, url });
-      if (!url) await chrome.search.query({ text: query, tabId: target });
-    } else if (kind === 'tab') {
+    let url;
+    if (kind === 'tab') {
       const target = await getTab(id);
       if (!target || target.windowId !== windowId) throw new Error('That tab has closed. Search again.');
-      chosenUrl = target.pendingUrl || target.url;
+      url = target.pendingUrl || target.url;
       const targetSpace = tabSpaceOf(target);
       if (targetSpace) setWindowSpace(windowId, targetSpace);
       await safe(() => chrome.tabs.update(target.id, { active: true }));
       await applyCollapse(windowId);
     } else if (kind === 'pin') {
       const pin = config.pins[id];
-      if (!pin) throw new Error('That pin has been removed.');
-      chosenUrl = pin.url;
+      if (!pin) throw new Error('That pinned tab was removed.');
+      url = pin.url;
       await handlers.openPin({ windowId, pinId: id, reset: false });
       if (pin.spaceId != null) setWindowSpace(windowId, pin.spaceId);
       await applyCollapse(windowId);
     } else if (kind === 'space') {
-      if (!spaceById(id)) throw new Error('That space has been removed.');
-      if (await pickSuccessor(windowId, id)) await handlers.switchSpace({ windowId, spaceId: id });
-      else await handlers.newTab({ windowId, spaceId: id });
+      await handlers.switchSpace({ windowId, spaceId: id });
+    } else if (kind === 'navigate' || kind === 'search') {
+      if (!text?.trim()) return;
+      url = kind === 'search' ? undefined : navigationUrl(text) || undefined;
+      const tab = await createTabInSpace(windowId, spaceId, { url });
+      if (!url) await chrome.search.query({ text: text.trim(), tabId: tab.id });
     } else if (kind === 'archive') {
-      const restored = await handlers.restoreArchive({ windowId, entryIds: [id] });
-      if (!restored.length) throw new Error('That tab has already been restored.');
+      await handlers.restoreArchive({ windowId, entryIds: [id] });
     } else if (kind === 'undo') {
       await handlers.undoArchive({ windowId });
+    } else if (kind === 'deleteArchive') {
+      return handlers.deleteArchive({ entryIds: [id] });
     } else if (kind === 'folder') {
       if (!text?.trim()) throw new Error('Enter a folder name.');
       return handlers.createFolder({ spaceId, name: text });
-    } else throw new Error('Unknown search action.');
-    await rememberSearch({ kind, id, text, query, chosenUrl });
-    return true;
+    } else {
+      throw new Error('Unknown search action.');
+    }
+    if (['tab', 'pin', 'navigate', 'search'].includes(kind)) await rememberSearchChoice({ kind, id, text, query, url });
+    await closeSearch(token);
+  },
+
+  // From overlay-host.js (a content script) when the overlay was dismissed on the page side.
+  async overlayClosed(_msg, sender) {
+    for (const [token, s] of Object.entries(rt.searches)) {
+      if (s.overlay && s.tabId === sender?.tab?.id) {
+        delete rt.searches[token];
+        touchRt();
+      }
+    }
   },
 });
 
@@ -1214,18 +1255,17 @@ Object.assign(handlers, {
   },
 });
 
-// Content scripts may reach Peek and scoped overlay handlers, never general state mutations.
-const CONTENT_SCRIPT_HANDLERS = new Set(['peek', 'peekClose', 'peekExpand', 'openCommandOverlay', 'commandContext', 'closeCommandOverlay', 'commandAction', 'essentialStatus', 'openEssentialLink']);
+// Content scripts may only use Peek, route an Essential link, check their own Essential
+// flag, or dismiss their own overlay. General state mutations stay in extension pages.
+const CONTENT_SCRIPT_HANDLERS = new Set(['peek', 'peekClose', 'peekExpand', 'overlayClosed', 'essentialStatus', 'openEssentialLink']);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handler = handlers[msg?.type];
   if (!handler) return;
-  const fromExtensionPage = sender.url?.startsWith(chrome.runtime.getURL(''));
+  const fromExtensionPage = extensionPagePath(sender) != null;
   if (!fromExtensionPage && !CONTENT_SCRIPT_HANDLERS.has(msg.type)) return;
-  const args = fromExtensionPage ? msg :
-    msg.type === 'commandAction' ? { token: msg.token, kind: msg.kind, id: msg.id, text: msg.text, query: msg.query } :
-    ['commandContext', 'closeCommandOverlay'].includes(msg.type) ? { token: msg.token } :
-    { type: msg.type, url: msg.url };
+  // A content script only ever acts on its own tab: drop any window/tab ids it passes.
+  const args = fromExtensionPage ? msg : { type: msg.type, url: msg.url };
   enqueue(() => handler(args, sender)).then(
     result => sendResponse({ ok: true, result }),
     error => sendResponse({ ok: false, error: String(error?.message ?? error) }),
@@ -1244,6 +1284,7 @@ chrome.tabs.onCreated.addListener(tab => {
 async function onTabCreated(tabId, createdUrl) {
   const tab = await getTab(tabId);
   if (!tab || !(await isNormalWindow(tab.windowId))) return;
+  rememberTab(tab);
   // Preserve the creation intent even if the user submits a URL before this queued handler runs.
   if (rt.tabParent[tabId] == null && isNewTabUrl(createdUrl, chrome.runtime.getURL(''))) { rt.treeDetached[tabId] = true; touchRt(); }
   if (rt.tabPeeks[tab.id]?.split) return;
@@ -1275,12 +1316,17 @@ async function onTabCreated(tabId, createdUrl) {
 }
 
 function updateMatters(tabId, ci) {
-  if (['pinned', 'groupId', 'splitViewId', 'url', 'title', 'favIconUrl'].some(key => key in ci)) return true;
+  if ('url' in ci || 'pinned' in ci || 'groupId' in ci || 'splitViewId' in ci) return true;
   if (!rt) return true;
   return tabId in rt.tabPin && ('url' in ci || 'title' in ci || 'favIconUrl' in ci || 'status' in ci);
 }
 
-chrome.tabs.onUpdated.addListener((tabId, ci) => {
+chrome.tabs.onUpdated.addListener((tabId, ci, tab) => {
+  if (tab && ('url' in ci || 'title' in ci || 'favIconUrl' in ci || 'pinned' in ci)) rememberTab(tab);
+  // A reload or new document removes an open search overlay along with the old page.
+  if (ci.status === 'loading' && rt && Object.values(rt.searches).some(x => x.overlay && x.tabId === tabId)) {
+    enqueue(() => handlers.overlayClosed({}, { tab: { id: tabId } }));
+  }
   if (ci.status === 'complete' && isPeekTab(tabId)) injectPeekUi(tabId);
   if (ci.status === 'complete' && rt?.tabPin[tabId]) syncEssentialFlag(tabId);
   if (updateMatters(tabId, ci)) enqueue(() => onTabUpdated(tabId, ci));
@@ -1294,8 +1340,7 @@ async function onTabUpdated(tabId, ci) {
     if (ci.splitViewId === chrome.tabs.SPLIT_VIEW_ID_NONE) await handlers.peekExpand({ tabId });
     return;
   }
-  if ('url' in ci) { await adoptTreeOpener(tab); if (tab.active) revealTabParents(tab); }
-  rememberTab(tab);
+  if ('url' in ci) { await adoptTreeOpener(tab); if (tab.active) revealTabParents(tab); touchRt(); }
   const pinId = rt.tabPin[tabId];
   const pin = pinId ? config.pins[pinId] : null;
   if (pinId && !pin) unbindTab(tabId);
@@ -1303,6 +1348,7 @@ async function onTabUpdated(tabId, ci) {
 
   if ('pinned' in ci) {
     if (tab.pinned) { delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchRt(); }
+    await pruneTabTree();
     if (tab.pinned) {
       // Pinned via Chrome's tab strip: treat it as "add to Essentials".
       delete rt.tabSpace[tabId];
@@ -1338,7 +1384,7 @@ async function onTabUpdated(tabId, ci) {
     }
   }
 
-  if ('groupId' in ci || 'pinned' in ci) await pruneTabTree();
+  if ('groupId' in ci) await pruneTabTree();
   if (!pin) return;
   const url = tab.url || tab.pendingUrl;
   if ('url' in ci && url && pin.lastUrl !== redactUrl(url, { keepHash: true })) {
@@ -1372,9 +1418,13 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
     lastActivation.set(windowId, { prev, curr: tabId, at });
     rt.mru[windowId] = [tabId, ...(rt.mru[windowId] ?? []).filter(id => id !== tabId)].slice(0, 200);
     touchRt();
-    // Switching away from a temporary-tab Peek dismisses it, like clicking outside a Glance.
+    // Switching away from a temporary-tab Peek dismisses it, like clicking outside it.
     // Split-view Peeks stay put; clicking the other pane must not close them.
     await closeTabPeeks(windowId, tabId, { splits: false });
+    // Switching tabs dismisses an open search, which belongs to the tab it was opened over.
+    for (const [token, x] of Object.entries(rt.searches)) {
+      if (x.windowId === windowId && (x.overlay ? x.tabId : x.launcherTabId) !== tabId) await closeSearch(token);
+    }
     const tab = await getTab(tabId);
     if (!tab) return;
     revealPinFolders(rt.tabPin[tabId]);
@@ -1395,9 +1445,11 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
   enqueue(async () => {
     const { windowId, isWindowClosing } = info;
     const spaceId = rt.tabSpace[tabId];
-    if (!expectedRemovals.has(tabId) && !isWindowClosing && !rt.tabPin[tabId] && !isPeekTab(tabId)) {
-      archiveTabs(rt.tabSnapshots[tabId] ? [{ ...rt.tabSnapshots[tabId], spaceId }] : []);
-    }
+    const wasActive = wasActiveTab(windowId, tabId, at);
+    // Closed from Chrome's own UI (Cmd+W, the strip): archive the last page it showed.
+    // Our own closes (sidebar, Clear) archive themselves as one batch in closeTabs.
+    const snapshot = tabSnapshots.get(tabId);
+    const archiveIt = !!snapshot && !(tabId in rt.tabPin) && !isPeekTab(tabId);
     const parent = rt.tabParent[tabId];
     for (const [child, id] of Object.entries(rt.tabParent)) if (id === tabId) {
       if (parent != null) rt.tabParent[child] = parent; else { delete rt.tabParent[child]; rt.treeDetached[child] = true; const current = await getTab(+child); if (current) rememberTab(current); }
@@ -1405,9 +1457,9 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
     delete rt.tabParent[tabId]; delete rt.treeDetached[tabId];
     for (const [child, id] of Object.entries(rt.tabParent)) if (id === parent) { const current = await getTab(+child); if (current) rememberTab(current); }
     for (const key of Object.keys(rt.treeCollapsed)) if (key.endsWith(`:${tabId}`)) delete rt.treeCollapsed[key];
-    delete rt.commandSessions[tabId];
-    delete rt.tabSnapshots[tabId];
-    const wasActive = wasActiveTab(windowId, tabId, at);
+    tabIdentities.delete(tabId);
+    forgetTab(tabId);
+    for (const [token, x] of Object.entries(rt.searches)) if (x.tabId === tabId || x.launcherTabId === tabId) delete rt.searches[token];
     delete rt.tabSpace[tabId];
     delete rt.tabPeeks[tabId];
     unbindTab(tabId);
@@ -1419,7 +1471,9 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
       expectedRemovals.add(+id);
       await chrome.tabs.remove(+id).catch(() => {});
     }
-    if (expectedRemovals.delete(tabId) || isWindowClosing || !wasActive) return;
+    const expected = expectedRemovals.delete(tabId);
+    if (!expected && !isWindowClosing && archiveIt) archiveTabs([{ ...snapshot, tabId, parentTabId: parent ?? null, parentPinId: rt.tabPin[parent] ?? null, windowId, spaceId, active: wasActive }]);
+    if (expected || isWindowClosing || !wasActive) return;
     await replaceLostActiveTab(windowId, tabId, spaceId);
   });
 });
@@ -1444,6 +1498,7 @@ chrome.tabs.onAttached.addListener((tabId, { newWindowId }) =>
     if (known && !spaceById(rt.activeSpace[newWindowId])) setWindowSpace(newWindowId, known);
     const spaceId = known ?? windowSpace(newWindowId);
     if (rt.groupSpace[tab.groupId] !== spaceId) await putTabInSpace(tab, spaceId);
+    rememberTab(tab);
     await pruneTabTree();
   }),
 );
@@ -1505,13 +1560,9 @@ chrome.windows.onRemoved.addListener(windowId =>
   }),
 );
 
-chrome.commands.onCommand.addListener((command, tab) => {
+chrome.commands.onCommand.addListener((command, tab) =>
   enqueue(async () => {
     const windowId = tab?.windowId ?? (await chrome.windows.getLastFocused()).id;
-    if (command === 'command-bar') {
-      const source = tab || (await chrome.tabs.query({ windowId, active: true }))[0];
-      if (source) await openCommandOverlay(source);
-    }
     if (command === 'next-space') await handlers.stepSpace({ windowId, delta: 1 });
     if (command === 'prev-space') await handlers.stepSpace({ windowId, delta: -1 });
     const spaceNumber = command.match(/^space-(\d)$/)?.[1];
@@ -1521,10 +1572,11 @@ chrome.commands.onCommand.addListener((command, tab) => {
       const pinId = active && rt.tabPin[active.id];
       if (pinId) await handlers.resetPin({ windowId, pinId });
     }
-    if (command === 'undo-close') await handlers.undoArchive({ windowId });
     if (command === 'copy-url') await handlers.copyUrl({ windowId });
-  });
-});
+    if (command === 'search') await handlers.openSearch({ windowId });
+    if (command === 'undo-close') await handlers.undoArchive({ windowId });
+  }),
+);
 
 // Service workers have no clipboard access; an offscreen document does the copy.
 async function copyToClipboard(text) {
@@ -1561,20 +1613,17 @@ handlers.copyUrl = async ({ windowId }) => {
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
 // ---------------------------------------------------------------------------------------
-// Peek (Zen's "Glance"): Option-click a link to open it in a popup window centered over the
+// Peek: Option-click a link to open it in a popup window centered over the
 // current one. Esc / ✕ / clicking back into the main window closes it; ⤢ or ⌘↩ turns it
 // into a regular tab in the space it was opened from. A popup window (not an iframe overlay)
 // keeps logins working and isn't blocked by sites that refuse to be framed.
 
-// Content scripts receive only the preferences and refresh signals they need.
+// Pushes the Option-click setting to the content script in every open page (it reads the
+// peekOnAltClick key on load, and gets live changes this way rather than via storage events,
+// which would hand it the whole config).
 async function broadcastPeekPrefs() {
-  const message = { type: 'peekPrefs', peekOnAltClick: !!config.settings.peekOnAltClick };
-  for (const tab of await chrome.tabs.query({})) chrome.tabs.sendMessage(tab.id, message).catch(() => {});
-}
-function broadcastOverlayRefresh() {
-  for (const id of Object.keys(rt?.commandSessions ?? {})) {
-    chrome.tabs.sendMessage(+id, { type: 'commandRefresh' }, { frameId: 0 }).catch(() => {});
-  }
+  const msg = { type: 'peekPrefs', peekOnAltClick: !!config.settings.peekOnAltClick };
+  for (const t of await chrome.tabs.query({})) chrome.tabs.sendMessage(t.id, msg).catch(() => {});
 }
 
 const isPeekTab = tabId => !!rt && (tabId in rt.tabPeeks || Object.values(rt.peeks).some(p => p.tabId === tabId));
@@ -1768,7 +1817,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // Reconcile: make runtime state match the real tabs. Runs on every service-worker start and
 // whenever an unknown group shows up. On the first run of a browser session it also re-binds
 // restored tabs to their pins by URL and adopts existing tab groups as spaces (which is also
-// how groups left behind by Arcify get migrated).
+// how groups left behind by another tab-group extension get picked up).
 
 let reconcileTimer;
 function scheduleReconcile() {
@@ -1824,6 +1873,13 @@ async function reconcile() {
   }
   for (const id of Object.keys(rt.tabSpace)) if (!liveTabs.has(+id)) delete rt.tabSpace[id];
   for (const id of Object.keys(rt.tabPeeks)) if (!liveTabs.has(+id)) delete rt.tabPeeks[id];
+  for (const [token, x] of Object.entries(rt.searches)) {
+    if (!liveTabs.has(x.overlay ? x.tabId : x.launcherTabId)) delete rt.searches[token];
+  }
+  // Rebuild the last-known page of every open tab (the archive uses it when a tab closes).
+  for (const id of tabSnapshots.keys()) if (!liveTabs.has(id)) tabSnapshots.delete(id);
+  for (const t of liveTabs.values()) rememberTab(t);
+  saveSnapshotsSoon();
   for (const wid of Object.keys(rt.activeSpace)) if (!windowIds.has(+wid)) delete rt.activeSpace[wid];
   for (const wid of Object.keys(rt.mru)) {
     if (!windowIds.has(+wid)) delete rt.mru[wid];
@@ -1891,14 +1947,7 @@ async function reconcile() {
 
   await pruneTabTree();
   if (initial) for (const tab of liveTabs.values()) await adoptTreeOpener(tab);
-  for (const tab of liveTabs.values()) if (tab.active) revealTabParents(tab);
-  for (const id of Object.keys(rt.commandSessions)) if (!liveTabs.has(+id)) delete rt.commandSessions[id];
-  for (const id of Object.keys(rt.tabSnapshots)) if (!liveTabs.has(+id)) delete rt.tabSnapshots[id];
-  for (const tab of liveTabs.values()) {
-    rememberTab(tab);
-    if (rt.tabPin[tab.id]) syncEssentialFlag(tab.id);
-    if (tab.active) revealPinFolders(rt.tabPin[tab.id]);
-  }
+  for (const tab of liveTabs.values()) if (tab.active) { revealTabParents(tab); revealPinFolders(rt.tabPin[tab.id]); }
 
   // First install: drop the placeholder "Main" space if existing groups were adopted instead.
   if (config.fresh) {

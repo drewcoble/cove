@@ -15,7 +15,7 @@
     const fresh=await chrome.tabs.create({windowId:W,url:'chrome://newtab/',openerTabId:parent,active:true});
     await wait(async()=> (await rt()).treeDetached[fresh.id]===true);
     await chrome.tabs.update(fresh.id,{url:'__BASE__/Typed-search-result'});
-    await wait(async()=> (await chrome.tabs.get(fresh.id)).status==='complete' && (await rt()).tabSnapshots[fresh.id]?.url==='__BASE__/Typed-search-result');
+    await wait(async()=> (await chrome.tabs.get(fresh.id)).status==='complete' && (await chrome.storage.session.get('tabSnapshots')).tabSnapshots?.[fresh.id]?.url==='__BASE__/Typed-search-result');
     ok(!(await rt()).tabParent[fresh.id],'a normal New Tab remains a root after entering a URL or searching');
     await chrome.tabs.update(control,{active:true});
     await wait(()=>document.querySelector(`[data-kind=tab][data-id="${fresh.id}"]`));

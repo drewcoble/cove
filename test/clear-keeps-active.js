@@ -30,14 +30,15 @@
     ok(tabs.some(t => t.id === active && t.active && t.url.endsWith('/clear-keep')), 'Clear keeps the current tab, URL, and selection');
     ok(tabs.some(t => t.id === pinned) && !tabs.some(t => t.id === other), 'Clear preserves pins and archives other ordinary tabs');
     ok(tabs.length === before.length - 1, 'Clear does not create a replacement New Tab');
-    let archive = (await cfg()).archive;
+    let archive = (await chrome.storage.local.get('archive')).archive;
     ok(archive.some(e => e.tabId === other) && !archive.some(e => e.tabId === active), 'only the removed tab enters the archive');
     const archiveCount = archive.length;
     await send('clearSpace', { windowId, spaceId });
     tabs = await chrome.tabs.query({ windowId });
-    ok(tabs.some(t => t.id === active && t.active) && (await cfg()).archive.length === archiveCount, 'Clear with only the active tab and pins is a no-op');
+    ok(tabs.some(t => t.id === active && t.active) && (await chrome.storage.local.get('archive')).archive.length === archiveCount, 'Clear with only the active tab and pins is a no-op');
     const restored = await send('undoArchive', { windowId });
-    ok(restored.length === 1 && (await rt()).tabSpace[restored[0]] === spaceId, 'Undo restores the other tab to its space');
+    const reopened = (await chrome.tabs.query({windowId})).find(t => (t.url || t.pendingUrl).endsWith('/clear-other'));
+    ok(restored === 1 && reopened && (await rt()).tabSpace[reopened.id] === spaceId, 'Undo restores the other tab to its space');
     ok(!!(await chrome.tabs.get(active)), 'Undo preserves the tab kept by Clear');
   } catch (error) { log.push('FAIL ' + error.stack); }
   return log.join('\n');

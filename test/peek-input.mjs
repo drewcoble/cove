@@ -25,7 +25,7 @@ const server = http.createServer((req, res) => {
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 
-const profile = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'zt-profile-'));
+const profile = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'cove-profile-'));
 const chrome = spawn(CHROME, [
   '--headless', '--remote-debugging-pipe', '--enable-unsafe-extension-debugging',
   `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank',
@@ -81,7 +81,7 @@ const click = async (s, x, y, modifiers) => {
 };
 const log = [];
 const ok = (c, m) => log.push((c ? 'PASS ' : 'FAIL ') + m);
-const step = message => { if (process.env.TRACE) console.log(message); };
+const step = () => {};
 try {
   const { id: extId } = await cdp('Extensions.loadUnpacked', { path: extPath });
   await sleep(1500);
@@ -129,6 +129,11 @@ try {
 
   await evalIn(ext, `chrome.runtime.sendMessage({ type: 'updateSettings', patch: { peekOnAltClick: false } }).then(() => 1)`);
   await sleep(500);
+  // The setting reaches an already-open page without a reload.
+  await click(page, x, y, 1);
+  await sleep(1200);
+  peeks = await evalIn(ext, `chrome.storage.session.get('rt').then(r => JSON.stringify(r.rt.peeks))`);
+  ok(peeks === '{}', 'turning Option-click off takes effect in pages that are already open');
   await evalIn(page, `location.href = '${base}/linkpage2'`);
   await sleep(1000);
   const page2 = await attachTo('/linkpage2');

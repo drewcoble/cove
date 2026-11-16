@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Cove",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Vertical tabs for Chrome with spaces, pinned tabs that remember their home, shared Essentials and Peek.",
   "minimum_chrome_version": "121",
   "permissions": [
@@ -34,8 +34,7 @@
         "<all_urls>"
       ],
       "js": [
-        "src/peek-trigger.js",
-        "src/command-overlay.js"
+        "src/peek-trigger.js"
       ],
       "run_at": "document_start",
       "all_frames": true
@@ -57,6 +56,20 @@
   "commands": {
     "_execute_action": {
       "description": "Open the Cove sidebar"
+    },
+    "search": {
+      "suggested_key": {
+        "default": "Ctrl+K",
+        "mac": "Command+K"
+      },
+      "description": "Search tabs, pins, spaces, history and commands"
+    },
+    "undo-close": {
+      "suggested_key": {
+        "default": "Alt+Shift+Z",
+        "mac": "Alt+Shift+Z"
+      },
+      "description": "Reopen the last closed tab (or cleared batch)"
     },
     "next-space": {
       "suggested_key": {
@@ -104,34 +117,17 @@
     },
     "space-9": {
       "description": "Go to space 9"
-    },
-    "command-bar": {
-      "suggested_key": {
-        "default": "Ctrl+K",
-        "mac": "Command+K"
-      },
-      "description": "Open floating search over the current page"
-    },
-    "undo-close": {
-      "suggested_key": {
-        "default": "Alt+Shift+Z"
-      },
-      "description": "Undo the last closed tab or cleared space"
     }
   },
   "web_accessible_resources": [
     {
       "resources": [
-        "src/search-catalog.js",
-        "src/search.js",
-        "src/shared.js",
-        "src/command-overlay.css",
-        "src/search-ranking.js",
-        "_favicon/*"
+        "src/launcher.html"
       ],
       "matches": [
         "<all_urls>"
-      ]
+      ],
+      "use_dynamic_url": true
     }
   ]
 }

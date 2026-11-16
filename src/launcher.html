@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Search — Cove</title>
+    <link rel="stylesheet" href="launcher.css" />
+    <script type="module" src="launcher.js"></script>
+  </head>
+  <body>
+    <header class="page-header">
+      <span class="wordmark"><img class="brand-mark" src="../icons/icon32.png" alt="" /> Cove</span>
+      <span class="space-badge"><span class="space-dot" aria-hidden="true"></span><span id="space-name"></span></span>
+    </header>
+    <main>
+      <section class="panel" aria-label="Search">
+        <form id="search-form" role="search" autocomplete="off">
+          <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+          <input
+            id="search"
+            type="text"
+            spellcheck="false"
+            autocapitalize="off"
+            placeholder="Search pins, history, or type a URL"
+            role="combobox"
+            aria-label="Search tabs, pins, spaces, history, or the web"
+            aria-controls="results"
+            aria-expanded="true"
+            aria-autocomplete="list"
+          />
+          <button id="clear" type="button" aria-label="Clear search" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+          </button>
+        </form>
+        <div class="heading"><span id="heading">Pick up where you left off</span><span id="count"></span></div>
+        <div id="results" role="listbox" aria-label="Results"></div>
+        <form id="folder-form" hidden>
+          <label for="folder-name">New folder in <span id="folder-space"></span></label>
+          <input id="folder-name" maxlength="100" placeholder="Folder name" autocomplete="off" />
+          <div class="actions">
+            <button id="folder-cancel" type="button">Cancel</button>
+            <button id="folder-save" type="submit" class="primary">Create folder</button>
+          </div>
+        </form>
+        <p id="error" class="error" role="alert" hidden></p>
+        <footer>
+          <span class="hints" aria-hidden="true"><kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open <kbd>&gt;</kbd> commands <kbd>esc</kbd> close</span>
+          <span class="footer-actions">
+            <button id="clear-archive" type="button" hidden>Clear all</button>
+            <button id="archive-toggle" type="button" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="20" height="5" x="2" y="3" rx="1" /><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /><path d="M10 12h4" /></svg>
+              Archive
+            </button>
+          </span>
+        </footer>
+      </section>
+      <p id="announce" class="sr-only" role="status" aria-live="polite"></p>
+    </main>
+  </body>
+</html>

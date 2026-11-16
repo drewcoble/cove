@@ -1,59 +1,59 @@
-import { hostname, pinTitle } from './shared.js';
-import { isNewTabUrl } from './search.js';
+// Everything search can find, as plain items. Pure: callers pass in the data, so it runs
+// only in extension pages and never sees a web page. Adapted from a contribution by Julio
+// Orozco (drewcoble/cove#1).
 
-// Pure catalog shared by New Tab and the in-page command overlay.
-export function searchCatalog({ config, rt, tabs, windowId, excludeTabId, spaceId, mode, root, spacePinsOnly = false }) {
-  const spaceName = id => config.spaces.find(space => space.id === id)?.name || (id == null ? 'Essentials' : 'Previous space');
-  const folderPath = pin => {
-    const names = [];
-    const seen = new Set();
-    let folder = config.folders?.[pin.folderId];
-    while (folder && !seen.has(folder.id)) {
-      names.unshift(folder.name);
-      seen.add(folder.id);
-      folder = config.folders[folder.parentId];
-    }
-    return names.join(' / ');
-  };
-  if (mode === 'archive') return config.archive.map(entry => ({
-    key: entry.id, kind: 'archive', id: entry.id, label: entry.title || hostname(entry.url) || entry.url,
-    detail: `${spaceName(entry.spaceId)} · ${hostname(entry.url)} · ${new Date(entry.closedAt).toLocaleDateString()}`,
-    searchDetail: `${entry.url} ${spaceName(entry.spaceId)}`, badge: 'Restore', icon: 'archive', url: entry.url,
-  }));
+import { hostname, pinTitle } from './shared.js';
+
+export function folderPath(folders, folderId) {
+  const names = [];
+  const seen = new Set();
+  let folder = folders?.[folderId];
+  while (folder && !seen.has(folder.id)) {
+    names.unshift(folder.name);
+    seen.add(folder.id);
+    folder = folders[folder.parentId];
+  }
+  return names.join(' / ');
+}
+
+const dateFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+
+export function searchCatalog({ config, archive = [], rt, tabs, windowId, excludeTabId, spaceId, mode, root }) {
+  const spaceName = id => config.spaces.find(space => space.id === id)?.name || (id == null ? 'Essentials' : 'Removed space');
+  const pathOf = pin => folderPath(config.folders, pin.folderId);
+
+  if (mode === 'archive') {
+    return archive.map(entry => ({
+      key: `archive-${entry.id}`, kind: 'archive', id: entry.id,
+      label: entry.title || hostname(entry.url) || entry.url,
+      detail: `${spaceName(entry.spaceId)} · ${hostname(entry.url)} · ${dateFormat.format(entry.closedAt)}`,
+      searchDetail: `${entry.url} ${spaceName(entry.spaceId)}`, badge: 'Restore', icon: 'archive', url: entry.url,
+    }));
+  }
+
   const items = [];
-  const mru = rt.mru?.[windowId] || [];
-  const rank = tab => mru.indexOf(tab.id) === -1 ? Infinity : mru.indexOf(tab.id);
-  const live = tabs.filter(tab => {
-    const url = tab.pendingUrl || tab.url || '';
-    return tab.id !== excludeTabId && !isNewTabUrl(url, root) && !url.startsWith(root);
-  }).sort((a, b) => rank(a) - rank(b) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
-  for (const tab of spacePinsOnly ? [] : live) {
-    const pin = config.pins[rt.tabPin?.[tab.id]];
-    const id = tab.pinned ? null : rt.groupSpace?.[tab.groupId] || rt.tabSpace?.[tab.id];
-    const url = tab.pendingUrl || tab.url || '';
-    items.push({ key: `tab-${tab.id}`, kind: 'tab', id: tab.id,
-      label: pin ? pinTitle(pin, tab) : tab.title || hostname(url) || 'Untitled tab',
-      detail: [hostname(url), spaceName(id), pin && folderPath(pin)].filter(Boolean).join(' · '),
-      searchDetail: `${url} ${spaceName(id)} ${pin ? folderPath(pin) : ''}`,
-      badge: 'Switch to tab', url, spaceId: id, lastAccessed: tab.lastAccessed, mruRank: rank(tab),
-    });
-  }
   for (const pin of Object.values(config.pins)) {
-    if (spacePinsOnly ? pin.spaceId != null && pin.spaceId !== spaceId : tabs.some(tab => rt.tabPin?.[tab.id] === pin.id)) continue;
-    items.push({ key: `pin-${pin.id}`, kind: 'pin', id: pin.id, label: pinTitle(pin),
-      detail: [hostname(pin.url), spaceName(pin.spaceId), folderPath(pin)].filter(Boolean).join(' · '),
-      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${folderPath(pin)}`, badge: spacePinsOnly ? 'Switch to tab' : 'Pinned', url: pin.url, spaceId: pin.spaceId,
+    if (pin.spaceId != null && pin.spaceId !== spaceId) continue;
+    const tab = tabs.find(t => t.windowId === windowId && rt.tabPin?.[t.id] === pin.id);
+    items.push({
+      key: `pin-${pin.id}`, kind: 'pin', id: pin.id, label: pinTitle(pin),
+      detail: [hostname(pin.url), spaceName(pin.spaceId), pathOf(pin)].filter(Boolean).join(' · '),
+      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${pathOf(pin)}`,
+      badge: tab ? 'Switch to tab' : 'Pinned', url: pin.url, spaceId: pin.spaceId,
+      lastAccessed: tab?.lastAccessed,
     });
   }
-  for (const space of config.spaces) items.push({ key: `space-${space.id}`, kind: 'space', id: space.id,
-    label: `Switch to ${space.name}`, detail: 'Space', badge: 'Switch space', icon: 'space', searchDetail: space.name,
-  });
+  for (const space of config.spaces) {
+    items.push({ key: `space-${space.id}`, kind: 'space', id: space.id, label: `Switch to ${space.name}`,
+      detail: 'Space', badge: 'Switch space', icon: 'space', searchDetail: space.name });
+  }
   items.push(
-    { key: 'folder', kind: 'action', id: 'folder', label: 'New folder', detail: `Organize pins in ${spaceName(spaceId)}`, badge: 'Create', icon: 'folder' },
-    { key: 'archive', kind: 'action', id: 'archive', label: 'View archive', detail: 'Find and restore closed tabs', badge: 'Open', icon: 'archive' },
+    { key: 'action-folder', kind: 'action', id: 'folder', label: 'New folder', detail: `Organize pins in ${spaceName(spaceId)}`, badge: 'Create', icon: 'folder' },
+    { key: 'action-archive', kind: 'action', id: 'archive', label: 'View archive', detail: 'Find and restore closed tabs', badge: 'Open', icon: 'archive' },
   );
-  if (config.archive.some(entry => entry.windowId === windowId)) items.push({ key: 'undo', kind: 'action', id: 'undo', label: 'Undo last close',
-    detail: 'Restore the last closed tab or cleared batch', badge: 'Restore', icon: 'undo',
-  });
+  if (archive.some(entry => entry.windowId === windowId)) {
+    items.push({ key: 'action-undo', kind: 'action', id: 'undo', label: 'Undo last close',
+      detail: 'Restore the last closed tab or cleared batch', badge: 'Restore', icon: 'undo' });
+  }
   return items;
 }

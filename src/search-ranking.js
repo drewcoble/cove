@@ -73,7 +73,7 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
     destinations.set(key, [item]); candidates.push(item);
   }
   for (const entry of memory.searches || []) candidates.push({ key: `search-${normalized(entry.text)}`, kind: 'search', text: entry.text,
-    label: entry.text, detail: 'Search again with your default search engine', badge: 'Recent search', count: entry.count, lastVisitTime: entry.lastUsed });
+    label: entry.text, detail: 'Search again with your default search engine', badge: 'Recent search', icon: 'search', count: entry.count, lastVisitTime: entry.lastUsed });
   const scored = [];
   for (const item of candidates) {
     const command = ['action', 'space'].includes(item.kind);
@@ -106,7 +106,7 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
     // The explicit search action also covers exact repeated searches; avoid two identical rows.
     const distinct = results.filter(item => item.kind !== 'search' || normalized(item.text) !== q);
     distinct.splice(Math.min(1, distinct.length), 0, { key: 'search-web', kind: 'search', text: raw,
-      label: `Search for “${raw}”`, detail: 'Use your default search engine', badge: 'Search web' });
+      label: `Search for “${raw}”`, detail: 'Use your default search engine', badge: 'Search web', icon: 'search' });
     return distinct.slice(0, limit);
   }
   return results.slice(0, limit);
