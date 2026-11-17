@@ -1027,6 +1027,7 @@ function openSettings(e) {
       <label class="toggle"><span>Collapse other spaces in the tab strip<small>Only the current space's tab group stays expanded.</small></span><input type="checkbox" name="collapseInactive"></label>
       <label class="toggle"><span>Click an active pinned tab to reset it<small>Sends it back to its pinned URL after you've navigated away.</small></span><input type="checkbox" name="resetOnReclick"></label>
       <label class="toggle"><span>Option-click a link to Peek<small>Opens it in a floating window. Esc closes it, ⌘↩ keeps it as a tab.</small></span><input type="checkbox" name="peekOnAltClick"></label>
+      <label class="toggle"><span>Open links from Essentials in Peek<small>Your Essential stays put behind the Peek.</small></span><input type="checkbox" name="peekFromEssentials"></label>
       <label class="toggle"><span>Open Peek in split view<small>Beside the current tab instead of a floating window. Full screen always uses split view.</small></span><input type="checkbox" name="peekInSplitView"></label>
       <label class="toggle"><span>Use browsing history in search<small>Search also finds pages you visited in the last 90 days and remembers what you pick.</small></span><input type="checkbox" name="searchHistory"></label>
       <label class="toggle"><span>Keep closed tabs in the archive<small>The last 500 closed tabs, kept on this computer. Undo reopens the last close.</small></span><input type="checkbox" name="archiveClosedTabs"></label>

@@ -65,22 +65,32 @@ export async function run({ cdp, sessionId: control, base }) {
     const source=await send('newTab',{windowId:W,spaceId:main,url:base+'/ranking-source'});
     await wait(()=>api(`chrome.tabs.get(${source}).then(t=>t.status==='complete')`),'source load');
     const page=await attach(base+'/ranking-source');
+    const ordinary=await send('newTab',{windowId:W,spaceId:main,url:base+'/Ranking-open'});
+    await wait(()=>api(`chrome.tabs.get(${ordinary}).then(t=>t.status==='complete')`),'ordinary tab load');
+    await send('unloadPin',{windowId:W,pinId:foreignId});
     const histories=Array.from({length:7},(_,i)=>({id:String(i),url:`https://known${i}.example/`,title:`Ranking known ${i}`,visitCount:10+i,lastVisitTime:Date.now()}));
     await api(`Promise.all(${JSON.stringify(histories)}.map(e=>chrome.history.addUrl({url:e.url})))`);
     let session=await open(source);
     await query(session.frame,'Ranking');
     let found=await rows(session.frame);
-    ok(found[1]?.badge==='Search web' && found.some(r=>r.label==='Ranking document') && !found.some(r=>r.label==='Ranking foreign'),'search reserves row two and scopes pins to the current space');
-    ok(!found.some(r=>r.badge==='Switch to tab' && r.label.includes('ranking-source')) && found.find(r=>r.label==='Ranking document')?.badge==='Switch to tab','ordinary tabs are not switch results; open folder pins are');
+    ok(found.some(r=>r.label==='Ranking document') && found.some(r=>r.label==='Ranking foreign'),'search includes open pins from the current and other spaces');
+    ok(found.find(r=>r.label==='Ranking document')?.badge==='Switch to tab','open folder pins are switch results');
+    ok(found.some(r=>r.label.includes('Ranking-open') && r.badge==='Switch to tab'),'ordinary open tabs remain searchable switch results');
+    await query(session.frame,'Ranking foreign');
+    await ev(session.frame,"document.querySelector('[role=option]').click()");
+    await wait(async()=> (await rt()).activeSpace[W]===other,'cross-space pin selection');
+    ok(true,'selecting an unloaded pin from another space opens it in its own space');
+    session=await open(source);
     await query(session.frame,'known'); found=await rows(session.frame);
     ok(found.some(r=>r.badge==='History' && r.icon?.includes('_favicon/')),'known history pages have site icons');
-    ok(await ev(session.frame,"(() => {const r=document.querySelector('#results');return r.children.length>4 && r.scrollHeight>r.clientHeight && r.clientHeight<=256;})()"),'four visible rows scroll to additional results');
+    ok((await rows(session.frame)).length<=7,'the default ranked result limit is retained');
     await close(session);
     await send('updateFolder',{folderId:folder,collapsed:true});
     await send('updateFolder',{folderId:nested,collapsed:true});
     session=await open(source); await query(session.frame,'Ranking document');
     await ev(session.frame,"document.querySelector('[role=option]').click()");
     await wait(()=>api(`chrome.tabs.get(${pinned}).then(t=>t.active)`),'switch pin');
+    await wait(async()=> !(await cfg()).folders[folder].collapsed && !(await cfg()).folders[nested].collapsed,'folder reveal');
     ok(!(await cfg()).folders[folder].collapsed && !(await cfg()).folders[nested].collapsed,'search activates the saved pin and expands all its folder ancestors');
     ok((await api(`chrome.tabs.query({windowId:${W}})`)).filter(t=>(t.url||t.pendingUrl)===base+'/ranking-pin').length===1,'switching a folder pin does not duplicate its live tab');
     // A trusted sidebar click selects the page, then the launcher must take keyboard focus.
@@ -99,13 +109,14 @@ export async function run({ cdp, sessionId: control, base }) {
     await key(session.frame,'Escape');
     await wait(()=>ev(page,"!document.querySelector('cove-search')"),'Escape dismissal');
     ok(true,'Escape also dismisses the overlay when the input loses focus');
-    // Explicit web search must replay exactly, even for text recognized as a URL.
+    // Legacy domain-shaped recent queries keep their search intent in either view.
+    await api("chrome.storage.local.set({searchMemory:{searches:[{text:'localhost',count:2,lastUsed:Date.now()}],selections:[]}})");
     const restricted=await send('newTab',{windowId:W,spaceId:main,url:'chrome://version'});
-    session=await open(restricted); await query(session.frame,'localhost');
-    const index=(await rows(session.frame)).findIndex(r=>r.badge==='Search web');
+    session=await open(restricted); await query(session.frame,'local');
+    const index=(await rows(session.frame)).findIndex(r=>r.badge==='Recent search' && r.label==='localhost');
     await ev(session.frame,`document.querySelectorAll('[role=option]')[${index}].click()`);
     await wait(()=>api(`chrome.tabs.query({windowId:${W},active:true}).then(t=>{try{return new URL(t[0].pendingUrl||t[0].url).searchParams.get('q')==='localhost'}catch{return false}})`),'fallback search query');
-    ok(true,'fallback explicit search preserves localhost as search text');
+    ok(true,'fallback recent search preserves localhost as search text');
     session=await open(source); await query(session.frame,'local');
     const recent=(await rows(session.frame)).findIndex(r=>r.badge==='Recent search' && r.label==='localhost');
     ok(recent>=0,'fallback queries are available in floating recent searches');

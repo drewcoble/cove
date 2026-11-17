@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Cove",
-  "version": "0.4.3",
+  "version": "0.1.0",
   "description": "Vertical tabs for Chrome with spaces, pinned tabs that remember their home, shared Essentials and Peek.",
   "minimum_chrome_version": "121",
   "permissions": [
@@ -15,8 +15,8 @@
     "clipboardWrite",
     "scripting",
     "contextMenus",
-    "history",
-    "webNavigation"
+    "webNavigation",
+    "history"
   ],
   "host_permissions": [
     "<all_urls>"

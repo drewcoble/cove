@@ -33,6 +33,7 @@
     await chrome.tabs.update(manual.id,{url:'__BASE__/Manually-nested'});
     await wait(async()=> (await chrome.tabs.get(manual.id)).status==='complete');
     ok((await rt()).tabParent[manual.id]===parent && !(await rt()).treeDetached[manual.id],'explicitly nesting a blank tab overrides root intent');
+    await wait(async()=> (await chrome.storage.local.get('tabTreeState')).tabTreeState?.parents[manual.id]===parent);
     await chrome.storage.local.set({__newTabTreeExpect:{root:fresh.id,parent,explicit,manual:manual.id}});
   }catch(error){log.push('FAIL '+error.stack);}
   return log.join('\n');

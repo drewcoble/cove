@@ -400,7 +400,3 @@ kbd {
     display: none;
   }
 }
-
-/* Four visible result rows; further matches remain scrollable. */
-#results { max-height: 256px; padding-bottom: 0; overflow-y: auto; }
-.result { min-height: 64px; box-sizing: border-box; }

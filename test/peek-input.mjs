@@ -142,7 +142,7 @@ try {
   peeks = await evalIn(ext, `chrome.storage.session.get('rt').then(r => JSON.stringify(r.rt.peeks))`);
   const url = await evalIn(ext, `chrome.tabs.query({ windowId: ${W}, active: true }).then(([t]) => t.url)`);
   ok(peeks === '{}' && url.endsWith('/other'), 'plain click still navigates normally (no Peek)');
-  // Real Essential clicks: external links open in the current space; internal navigation stays put.
+  // Real clicks inside an Essential: other-site link -> Peek, same-site link -> navigates.
   const essId = await evalIn(ext, `chrome.tabs.create({ windowId: ${W}, url: '${base}/essential', active: true }).then(t => t.id)`);
   await sleep(1200);
   await evalIn(ext, `chrome.runtime.sendMessage({ type: 'pinTab', tabId: ${essId}, spaceId: null }).then(() => 1)`);
@@ -152,37 +152,43 @@ try {
   await click(ess, far.x, far.y, 0);
   await sleep(1500);
   peeks = JSON.parse(await evalIn(ext, `chrome.storage.session.get('rt').then(r => JSON.stringify(r.rt.peeks))`));
-  const linked = await evalIn(ext, `chrome.tabs.query({ windowId: ${W}, active: true }).then(([t]) => ({ id: t.id, url: t.url }))`);
-  const linkState = JSON.parse(await evalIn(ext, `chrome.storage.session.get('rt').then(r => JSON.stringify(r.rt))`));
-  ok(Object.keys(peeks).length === 0 && linked.url.includes('/far') && linkState.tabSpace[linked.id] === linkState.activeSpace[W] && (await evalIn(ess, 'location.pathname')) === '/essential',
-    'clicking an external link in an Essential opens it in the current space and preserves the Essential');
+  ok(Object.keys(peeks).length === 1 && (await evalIn(ess, 'location.pathname')) === '/essential',
+    'clicking an other-site link in an Essential opens a Peek and leaves the Essential in place');
   for (const id of Object.keys(peeks)) await evalIn(ext, `chrome.runtime.sendMessage({ type: 'peekClose', windowId: ${id} }).then(() => 1)`);
   await sleep(500);
-  await evalIn(ext, `chrome.tabs.update(${essId}, { active: true })`);
   await click(ess, x, y, 0);
   await sleep(1200);
   const essUrl = await evalIn(ext, `chrome.tabs.get(${essId}).then(t => t.url)`);
   ok(essUrl.endsWith('/other'), 'same-site link in an Essential navigates normally');
 
-  // Essential target=_blank links remain regular tabs, in windowed and fullscreen layouts.
-  const essPage = ess;
+  // A target=_blank link clicked inside the Essential opens in Peek (windowed: popup;
+  // full screen: split view), while the Essential stays where it was.
+  const essPage = await attachTo('/other');
   const blank = JSON.parse(await evalIn(essPage, `(() => { const r = document.getElementById('blank').getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`));
   const tabsBefore = await evalIn(ext, `chrome.tabs.query({ windowId: ${W} }).then(t => t.length)`);
   await click(essPage, blank.x, blank.y, 0);
-  await sleep(1000);
-  const opened = await evalIn(ext, `chrome.tabs.query({ windowId: ${W}, active: true }).then(([t]) => ({id:t.id,url:t.url}))`);
+  await sleep(1800);
   peeks = JSON.parse(await evalIn(ext, `chrome.storage.session.get('rt').then(r => JSON.stringify(r.rt.peeks))`));
-  ok(!Object.keys(peeks).length && opened.url.endsWith('/opened') &&
-    (await evalIn(ext, `chrome.tabs.query({ windowId: ${W} }).then(t => t.length)`)) === tabsBefore + 1,
-    'target=_blank link from an Essential stays open as a normal tab');
-  await evalIn(ext, `chrome.windows.update(${W}, { state: 'fullscreen' }).then(() => 1)`);
+  const peekUrl = await evalIn(ext, `Promise.all(Object.values(${JSON.stringify(peeks)}).map(p => chrome.tabs.get(p.tabId))).then(t => t.map(x => x.pendingUrl || x.url).join())`);
+  ok(Object.keys(peeks).length === 1 && peekUrl.endsWith('/opened') &&
+    (await evalIn(ext, `chrome.tabs.query({ windowId: ${W} }).then(t => t.length)`)) === tabsBefore,
+    'target=_blank link clicked in an Essential opens in Peek, not a new tab: ' + peekUrl);
+  for (const id of Object.keys(peeks)) await evalIn(ext, `chrome.runtime.sendMessage({ type: 'peekClose', windowId: ${id} }).then(() => 1)`);
   await sleep(500);
-  await evalIn(ext, `chrome.tabs.update(${essId}, { active: true }).then(() => 1)`);
-  await click(essPage, blank.x, blank.y, 0);
+
+  await evalIn(ext, `chrome.windows.update(${W}, { state: 'fullscreen' }).then(() => 1)`);
   await sleep(1000);
-  const fullscreenLink = await evalIn(ext, `chrome.tabs.query({ windowId: ${W}, active: true }).then(([t]) => ({url:t.url,split:t.splitViewId}))`);
-  ok(fullscreenLink.url.endsWith('/opened') && fullscreenLink.split === (await evalIn(ext, 'chrome.tabs.SPLIT_VIEW_ID_NONE')) &&
-    (await evalIn(ess, 'location.pathname')) === '/other', 'full screen: Essential links open as normal tabs and preserve the Essential');
+  await evalIn(ext, `chrome.tabs.update(${essId}, { active: true }).then(() => 1)`);
+  await sleep(300);
+  await click(essPage, blank.x, blank.y, 0);
+  await sleep(1800);
+  const split = JSON.parse(await evalIn(ext, `chrome.storage.session.get('rt').then(async r => {
+    const [id, p] = Object.entries(r.rt.tabPeeks)[0] ?? [];
+    if (!id) return 'null';
+    const t = await chrome.tabs.get(+id);
+    return JSON.stringify({ split: p.split, url: t.url || t.pendingUrl, with: p.returnTabId === ${essId} });
+  })`));
+  ok(split?.split && split.with && split.url.endsWith('/opened'), 'full screen: the same click opens a split Peek beside the Essential: ' + JSON.stringify(split));
 
   console.log(log.join('\n'));
   done(/FAIL/.test(log.join()) ? 1 : 0);

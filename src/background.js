@@ -50,6 +50,7 @@ function defaultConfig() {
       collapseInactive: true,
       resetOnReclick: true,
       peekOnAltClick: true,
+      peekFromEssentials: true,
       peekInSplitView: false,
       searchHistory: true,
       archiveClosedTabs: true,
@@ -78,7 +79,6 @@ function emptyRt() {
 function normalizeConfig(c) {
   const cfg = c ?? defaultConfig();
   cfg.settings = { ...defaultConfig().settings, ...cfg.settings };
-  delete cfg.settings.peekFromEssentials;
   cfg.pins ??= {};
   cfg.essentials = (cfg.essentials ?? []).filter(id => cfg.pins[id]);
   if (!cfg.spaces?.length) cfg.spaces = defaultConfig().spaces;
@@ -135,13 +135,18 @@ function normalizeArchive(entries) {
 // never interleave, and state is flushed to storage once per task.
 
 let treeRestoreIdentity;
-const tabIdentities = new Map();
+const tabWindows = new Map(); // tab id -> window id, never a URL
+let lastTreeShape = null;
+let treeSaveTimer;
+let browserStarting = false;
 let dirtyConfig = false;
 let dirtyRt = false;
+let dirtyTree = false;
 let dirtyArchive = false;
 const touchConfig = () => (dirtyConfig = true);
 const touchRt = () => (dirtyRt = true);
 const touchArchive = () => (dirtyArchive = true);
+const touchTree = () => { dirtyTree = true; touchRt(); };
 
 async function flush() {
   const writes = [];
@@ -154,9 +159,15 @@ async function flush() {
   if (dirtyRt) {
     dirtyRt = false;
     writes.push(chrome.storage.session.set({ rt }));
-    const ids = new Set([...Object.keys(rt.tabParent), ...Object.values(rt.tabParent).map(String), ...Object.keys(rt.treeDetached), ...Object.keys(rt.treeCollapsed).map(key => key.slice(key.lastIndexOf(':') + 1))]);
-    const identities = Object.fromEntries([...ids].filter(id => tabIdentities.has(+id)).map(id => [id, tabIdentities.get(+id)]));
-    writes.push(chrome.storage.local.set({ tabTreeState: { parents: rt.tabParent, detached: rt.treeDetached, collapsed: rt.treeCollapsed, identities } }));
+  }
+  if (dirtyTree) {
+    dirtyTree = false;
+    const shape = JSON.stringify({ parents: rt.tabParent, detached: rt.treeDetached, collapsed: rt.treeCollapsed });
+    if (shape !== lastTreeShape) {
+      lastTreeShape = shape;
+      clearTimeout(treeSaveTimer);
+      treeSaveTimer = setTimeout(() => enqueue(saveTabTree), 300);
+    }
   }
   if (dirtyArchive) {
     dirtyArchive = false;
@@ -164,6 +175,29 @@ async function flush() {
   }
   await Promise.all(writes);
 }
+
+async function saveTabTree() {
+  const ids = new Set([...Object.keys(rt.tabParent), ...Object.values(rt.tabParent).map(String),
+    ...Object.keys(rt.treeDetached), ...Object.keys(rt.treeCollapsed).map(key => key.slice(key.lastIndexOf(':') + 1))]);
+  const identities = Object.fromEntries([...ids].filter(id => tabWindows.has(+id))
+    .map(id => [id, { windowId: tabWindows.get(+id) }]));
+  await chrome.storage.local.set({ tabTreeState: {
+    parents: rt.tabParent, detached: rt.treeDetached, collapsed: rt.treeCollapsed, identities,
+  } });
+}
+
+// Chrome may recycle tab/window ids in a new browser session. Keep extension-reload
+// recovery within a session, but never attach yesterday's tree to today's reused ids.
+chrome.runtime.onStartup.addListener(() => {
+  browserStarting = true;
+  enqueue(async () => {
+    clearTimeout(treeSaveTimer);
+    rt.tabParent = {}; rt.treeDetached = {}; rt.treeCollapsed = {};
+    lastTreeShape = JSON.stringify({ parents: rt.tabParent, detached: rt.treeDetached, collapsed: rt.treeCollapsed });
+    await chrome.storage.local.remove('tabTreeState');
+    touchRt();
+  });
+});
 
 const ready = (async () => {
   const [{ config: c, archive: a, searchMemory, tabTreeState }, { rt: r, tabSnapshots: snaps }] = await Promise.all([
@@ -173,21 +207,21 @@ const ready = (async () => {
   const stored = JSON.stringify(c);
   config = normalizeConfig(c);
   rt = { ...emptyRt(), ...r };
-  if (searchMemory) await chrome.storage.local.set({ searchMemory: normalizeSearchMemory(searchMemory) });
-  if (!r?.tabParent && tabTreeState) {
+  if (searchMemory) {
+    const normalized = normalizeSearchMemory(searchMemory);
+    if (JSON.stringify(normalized) !== JSON.stringify(searchMemory)) {
+      await chrome.storage.local.set({ searchMemory: normalized });
+    }
+  }
+  if (!browserStarting && !r?.tabParent && tabTreeState) {
     rt.tabParent = tabTreeState.parents || {}; rt.treeCollapsed = tabTreeState.collapsed || {};
     rt.treeDetached = tabTreeState.detached || {}; treeRestoreIdentity = tabTreeState.identities || {};
   }
-  // The previous development build kept closed tabs inside config. Merge once into
-  // upstream's separate archive key, preserving entries from either installation.
-  const legacyArchive = Array.isArray(config.archive) ? config.archive : [];
-  if ('archive' in config) { delete config.archive; touchConfig(); touchArchive(); }
   if (!c || JSON.stringify(config) !== stored) touchConfig();
-  const entries = [...legacyArchive, ...(Array.isArray(a) ? a : [])];
-  archive = normalizeArchive([...new Map(entries.map(entry => [entry?.id, entry])).values()]
-    .sort((a, b) => (b?.closedAt || 0) - (a?.closedAt || 0)));
+  archive = normalizeArchive(a);
   for (const [id, snap] of Object.entries(snaps ?? {})) if (!tabSnapshots.has(+id)) tabSnapshots.set(+id, snap);
   await chrome.storage.local.set({ peekOnAltClick: !!config.settings.peekOnAltClick });
+  lastTreeShape = JSON.stringify({ parents: rt.tabParent, detached: rt.treeDetached, collapsed: rt.treeCollapsed });
   await reconcile().catch(e => console.error('[cove] reconcile failed', e));
   await flush();
 })();
@@ -384,12 +418,11 @@ function unbindTab(tabId) {
 }
 
 // Tells peek-trigger.js (same isolated world) whether its tab is an Essential, so links to
-// other sites open regular tabs in the current space. Re-sent on every
-// page load because the flag lives on the document.
+// other sites open in Peek. Re-sent on every page load because the flag lives on the document.
 const essentialFlagged = new Set();
 function syncEssentialFlag(tabId) {
   const pin = config?.pins[rt?.tabPin[tabId]];
-  const on = !!pin && pin.spaceId == null;
+  const on = !!pin && pin.spaceId == null && !!config.settings.peekFromEssentials;
   if (!on && !essentialFlagged.has(tabId)) return;
   if (on) essentialFlagged.add(tabId);
   else essentialFlagged.delete(tabId);
@@ -511,28 +544,35 @@ function parseSetup(data) {
 async function pruneTabTree() {
   const tabs = await chrome.tabs.query({});
   const byId = new Map(tabs.map(tab => [tab.id, tab]));
+  let changed = false;
   for (const [child, parent] of Object.entries(rt.tabParent)) {
-    if (!validParent(byId.get(+child), byId.get(parent), rt)) { delete rt.tabParent[child]; rt.treeDetached[child] = true; }
+    if (!validParent(byId.get(+child), byId.get(parent), rt)) {
+      delete rt.tabParent[child]; rt.treeDetached[child] = true; changed = true;
+    }
   }
-  for (const id of Object.keys(rt.treeDetached)) if (!byId.has(+id)) delete rt.treeDetached[id];
-  for (const key of Object.keys(rt.treeCollapsed)) if (!byId.has(+key.slice(key.lastIndexOf(':') + 1))) delete rt.treeCollapsed[key];
-  touchRt();
+  for (const id of Object.keys(rt.treeDetached)) if (!byId.has(+id)) { delete rt.treeDetached[id]; changed = true; }
+  for (const key of Object.keys(rt.treeCollapsed)) if (!byId.has(+key.slice(key.lastIndexOf(':') + 1))) { delete rt.treeCollapsed[key]; changed = true; }
+  if (changed) touchTree();
 }
 function revealTabParents(tab) {
   const spaceId = treeSpace(tab, rt) || windowSpace(tab.windowId);
   const seen = new Set(); let id = rt.tabParent[tab.id];
+  let changed = false;
   while (id != null && !seen.has(id)) {
-    seen.add(id); delete rt.treeCollapsed[`${spaceId}:${id}`];
+    seen.add(id);
+    const key = `${spaceId}:${id}`;
+    if (rt.treeCollapsed[key]) { delete rt.treeCollapsed[key]; changed = true; }
     revealPinFolders(rt.tabPin[id]); id = rt.tabParent[id];
   }
-  touchRt();
+  if (changed) touchTree();
 }
 // openerTabId is only a browser hint: external apps can inherit the active tab as
 // their opener. Only a renderer-created navigation target confirms a link's source.
-chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) =>
+chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId, url }) =>
   enqueue(async () => {
     const [tab, source] = await Promise.all([getTab(tabId), getTab(sourceTabId)]);
     if (!tab || !source || tab.windowId !== source.windowId || !(await isNormalWindow(tab.windowId))) return;
+    if (await peekInsteadOfTab(tab, sourceTabId, url)) return;
     if (tab.pinned || rt.tabPin[tabId] || isPeekTab(tabId) || isPeekTab(sourceTabId)) return;
     if ((tab.pendingUrl || tab.url || '').startsWith('chrome-extension:') ||
         (source.pendingUrl || source.url || '').startsWith('chrome-extension:')) return;
@@ -542,7 +582,7 @@ chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId
     const current = await getTab(tabId);
     if (!validParent(current, source, rt)) return;
     rt.tabParent[tabId] = sourceTabId;
-    touchRt();
+    touchTree();
     if (current.active) {
       setWindowSpace(current.windowId, spaceId);
       revealTabParents(current);
@@ -565,7 +605,7 @@ const handlers = {
       rt.tabParent[tabId] = parentId;
       delete rt.treeCollapsed[`${treeSpace(tab, rt)}:${parentId}`];
     } else { delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; }
-    touchRt();
+    touchTree();
     if (beforeTabId != null) await handlers.moveTab({ tabId, spaceId: treeSpace(tab, rt), beforeTabId });
     const current = await getTab(tabId); if (current) rememberTab(current);
   },
@@ -574,7 +614,7 @@ const handlers = {
     if (!tab || tab.windowId !== windowId || !spaceById(spaceId)) return;
     const key = `${spaceId}:${tabId}`;
     if (rt.treeCollapsed[key]) delete rt.treeCollapsed[key]; else rt.treeCollapsed[key] = true;
-    touchRt();
+    touchTree();
   },
   async newChildTab({ tabId }) {
     const parent = await getTab(tabId);
@@ -582,7 +622,7 @@ const handlers = {
     const spaceId = treeSpace(parent, rt) || windowSpace(parent.windowId);
     const child = await createTabInSpace(parent.windowId, spaceId, { openerTabId: parent.id });
     delete rt.treeDetached[child.id];
-    rt.tabParent[child.id] = parent.id; revealTabParents(child); touchRt();
+    rt.tabParent[child.id] = parent.id; revealTabParents(child); touchTree();
     return child.id;
   },
   async switchSpace({ windowId, spaceId }) {
@@ -749,7 +789,7 @@ const handlers = {
     validateFolder(folderId, spaceId);
     const existing = rt.tabPin[tabId];
     if (existing && config.pins[existing]) return handlers.movePin({ pinId: existing, spaceId, index, folderId });
-    delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchRt();
+    delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchTree();
     const pin = createPin(tab, spaceId, index);
     pin.folderId = folderId;
     bindTab(tabId, pin.id);
@@ -879,6 +919,7 @@ const handlers = {
   async updateSettings({ patch }) {
     Object.assign(config.settings, patch);
     touchConfig();
+    if ('peekFromEssentials' in patch) for (const id of Object.keys(rt.tabPin)) syncEssentialFlag(+id);
     if ('peekOnAltClick' in patch) broadcastPeekPrefs();
     if (!('collapseInactive' in patch)) return;
     if (patch.collapseInactive) {
@@ -1001,7 +1042,7 @@ function forgetTab(tabId) {
 // Called straight from tabs.onUpdated (not through the queue): only url/title/favicon
 // changes matter, and nothing is written unless one of them actually changed.
 function rememberTab(tab) {
-  tabIdentities.set(tab.id, { windowId: tab.windowId, url: redactUrl(tab.pendingUrl || tab.url, { keepHash: true }) });
+  tabWindows.set(tab.id, tab.windowId);
   const url = redactUrl(tab.pendingUrl || tab.url, { keepHash: true });
   if (tab.pinned || !isWebUrl(url)) return forgetTab(tab.id);
   const old = tabSnapshots.get(tab.id);
@@ -1045,7 +1086,7 @@ Object.assign(handlers, {
       const parent = parentId != null ? await getTab(parentId) : null;
       if (validParent(tab, parent, rt)) rt.tabParent[tab.id] = parent.id;
     }
-    touchRt();
+    touchTree();
     if (focus) {
       revealTabParents(focus.tab);
       setWindowSpace(windowId, focus.spaceId);
@@ -1144,7 +1185,7 @@ async function rememberSearchChoice({ kind, id, text, query, url }) {
   }
   const typed = typeof query === 'string' ? searchMemoryText(query).toLocaleLowerCase() : '';
   if (typed && !typed.startsWith('>')) {
-    const key = kind === 'pin' ? `pin-${id}` : url ? destinationKey(searchMemoryText(url)) : `search-${searchMemoryText(text).toLocaleLowerCase()}`;
+    const key = url ? destinationKey(searchMemoryText(url)) : `search-${searchMemoryText(text).toLocaleLowerCase()}`;
     const previous = (memory.selections || []).find(e => e.query === typed && e.key === key);
     const rest = (memory.selections || []).filter(e => e !== previous);
     memory.selections = [{ query: typed, key, count: (previous?.count || 0) + 1, lastUsed: now }, ...rest].slice(0, MAX_SEARCH_MEMORY.selections);
@@ -1250,30 +1291,9 @@ Object.assign(handlers, {
   },
 });
 
-Object.assign(handlers, {
-  async essentialStatus(_message, sender) {
-    const pin = config.pins[rt.tabPin[sender.tab?.id]];
-    return !!pin && pin.spaceId == null;
-  },
-  async openEssentialLink({ url }, sender) {
-    const source = sender.tab && await getTab(sender.tab.id);
-    const pin = source && config.pins[rt.tabPin[source.id]];
-    if (!source || !source.pinned || !pin || pin.spaceId != null || !isWebUrl(url)) {
-      throw new Error('The source is no longer an Essential.');
-    }
-    const spaceId = windowSpace(source.windowId);
-    const tab = await createTabInSpace(source.windowId, spaceId, { url, openerTabId: source.id });
-    rt.tabParent[tab.id] = source.id;
-    revealTabParents(tab);
-    setWindowSpace(source.windowId, spaceId);
-    await applyCollapse(source.windowId);
-    return tab.id;
-  },
-});
-
-// Content scripts may only use Peek, route an Essential link, check their own Essential
-// flag, or dismiss their own overlay. General state mutations stay in extension pages.
-const CONTENT_SCRIPT_HANDLERS = new Set(['peek', 'peekClose', 'peekExpand', 'overlayClosed', 'essentialStatus', 'openEssentialLink']);
+// Content scripts run on every site, so they may only reach the Peek handlers and tell us an
+// overlay was dismissed (which returns nothing and only affects their own tab).
+const CONTENT_SCRIPT_HANDLERS = new Set(['peek', 'peekClose', 'peekExpand', 'overlayClosed']);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handler = handlers[msg?.type];
@@ -1302,7 +1322,7 @@ async function onTabCreated(tabId, createdUrl) {
   if (!tab || !(await isNormalWindow(tab.windowId))) return;
   rememberTab(tab);
   // Preserve the creation intent even if the user submits a URL before this queued handler runs.
-  if (rt.tabParent[tabId] == null && isNewTabUrl(createdUrl, chrome.runtime.getURL(''))) { rt.treeDetached[tabId] = true; touchRt(); }
+  if (rt.tabParent[tabId] == null && isNewTabUrl(createdUrl, chrome.runtime.getURL(''))) { rt.treeDetached[tabId] = true; touchTree(); }
   if (rt.tabPeeks[tab.id]?.split) return;
   if (tab.pinned) {
     if (!rt.tabPin[tab.id]) bindTab(tab.id, createPin(tab, null).id);
@@ -1330,7 +1350,7 @@ async function onTabCreated(tabId, createdUrl) {
 }
 
 function updateMatters(tabId, ci) {
-  if ('url' in ci || 'pinned' in ci || 'groupId' in ci || 'splitViewId' in ci) return true;
+  if ('pinned' in ci || 'groupId' in ci || 'splitViewId' in ci) return true;
   if (!rt) return true;
   return tabId in rt.tabPin && ('url' in ci || 'title' in ci || 'favIconUrl' in ci || 'status' in ci);
 }
@@ -1354,14 +1374,14 @@ async function onTabUpdated(tabId, ci) {
     if (ci.splitViewId === chrome.tabs.SPLIT_VIEW_ID_NONE) await handlers.peekExpand({ tabId });
     return;
   }
-  if ('url' in ci) { if (tab.active) revealTabParents(tab); touchRt(); }
+  if ('url' in ci && tab.active) revealTabParents(tab);
   const pinId = rt.tabPin[tabId];
   const pin = pinId ? config.pins[pinId] : null;
   if (pinId && !pin) unbindTab(tabId);
   if (pin && tab.active && ci.url) revealPinFolders(pinId);
 
   if ('pinned' in ci) {
-    if (tab.pinned) { delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchRt(); }
+    if (tab.pinned) { delete rt.tabParent[tabId]; rt.treeDetached[tabId] = true; touchTree(); }
     await pruneTabTree();
     if (tab.pinned) {
       // Pinned via Chrome's tab strip: treat it as "add to Essentials".
@@ -1471,7 +1491,8 @@ chrome.tabs.onRemoved.addListener((tabId, info) => {
     delete rt.tabParent[tabId]; delete rt.treeDetached[tabId];
     for (const [child, id] of Object.entries(rt.tabParent)) if (id === parent) { const current = await getTab(+child); if (current) rememberTab(current); }
     for (const key of Object.keys(rt.treeCollapsed)) if (key.endsWith(`:${tabId}`)) delete rt.treeCollapsed[key];
-    tabIdentities.delete(tabId);
+    touchTree();
+    tabWindows.delete(tabId);
     forgetTab(tabId);
     for (const [token, x] of Object.entries(rt.searches)) if (x.tabId === tabId || x.launcherTabId === tabId) delete rt.searches[token];
     delete rt.tabSpace[tabId];
@@ -1513,6 +1534,10 @@ chrome.tabs.onAttached.addListener((tabId, { newWindowId }) =>
     const spaceId = known ?? windowSpace(newWindowId);
     if (rt.groupSpace[tab.groupId] !== spaceId) await putTabInSpace(tab, spaceId);
     rememberTab(tab);
+    if (rt.tabParent[tabId] != null || Object.values(rt.tabParent).includes(tabId) || rt.treeDetached[tabId]) {
+      lastTreeShape = null; // Moving a live tree changes its window identity.
+      touchTree();
+    }
     await pruneTabTree();
   }),
 );
@@ -1532,7 +1557,7 @@ chrome.tabs.onReplaced.addListener((added, removed) =>
       const i = list.indexOf(removed);
       if (i !== -1) list[i] = added;
     }
-    touchRt();
+    touchTree();
   }),
 );
 
@@ -1631,6 +1656,27 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => 
 // current one. Esc / ✕ / clicking back into the main window closes it; ⤢ or ⌘↩ turns it
 // into a regular tab in the space it was opened from. A popup window (not an iframe overlay)
 // keeps logins working and isn't blocked by sites that refuse to be framed.
+
+async function peekInsteadOfTab(tab, sourceTabId, targetUrl) {
+  const opener = config.pins[rt.tabPin[sourceTabId]];
+  if (!config.settings.peekFromEssentials || !tab.active || !opener || opener.spaceId != null) return false;
+  const url = tab.pendingUrl || tab.url || targetUrl;
+  const openerTab = await getTab(sourceTabId);
+  // A duplicate of the Essential itself isn't "following a link".
+  if (!isWebUrl(url) || !openerTab || sameUrl(url, openerTab.url)) return false;
+  const fullscreen = (await chrome.windows.get(tab.windowId).catch(() => null))?.state === 'fullscreen';
+  if (fullscreen && !(await canSplitWith(openerTab))) {
+    // No split possible: the new tab itself becomes a temporary-tab Peek, so no reload.
+    await closeTabPeeks(tab.windowId, tab.id);
+    registerTabPeek(tab.id, tab.windowId, openerTab.id);
+    return false;
+  }
+  expectedRemovals.add(tab.id);
+  await safe(() => chrome.tabs.update(openerTab.id, { active: true })).catch(() => {});
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  await handlers.peek({ url, windowId: tab.windowId }, { tab: openerTab });
+  return true;
+}
 
 // Pushes the Option-click setting to the content script in every open page (it reads the
 // peekOnAltClick key on load, and gets live changes this way rather than via storage events,
@@ -1849,12 +1895,14 @@ async function reconcile() {
   if (treeRestoreIdentity) {
     const matches = id => {
       const tab = liveTabs.get(+id), saved = treeRestoreIdentity[id];
-      return tab && saved && tab.windowId === saved.windowId && redactUrl(tab.pendingUrl || tab.url, { keepHash: true }) === saved.url;
+      return !browserStarting && tab && saved && tab.windowId === saved.windowId &&
+        (saved.url == null || redactUrl(tab.pendingUrl || tab.url, { keepHash: true }) === saved.url);
     };
     for (const [child, parent] of Object.entries(rt.tabParent)) if (!matches(child) || !matches(parent)) delete rt.tabParent[child];
     for (const id of Object.keys(rt.treeDetached)) if (!matches(id)) delete rt.treeDetached[id];
     for (const key of Object.keys(rt.treeCollapsed)) if (!matches(key.slice(key.lastIndexOf(':') + 1))) delete rt.treeCollapsed[key];
     treeRestoreIdentity = null;
+    dirtyTree = true;
   }
   const groups = (await chrome.tabGroups.query({})).filter(g => windowIds.has(g.windowId));
   const liveGroups = new Set(groups.map(g => g.id));

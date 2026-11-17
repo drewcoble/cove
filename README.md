@@ -72,24 +72,24 @@ collapsed by default, so the strip only shows the current space (you can turn th
   goes back to full width; ⤢ / ⌘↩ keeps it as a normal tab in your current space. A setting uses
   split view outside full screen too. If the tab is already in a split you made, Peek falls back
   to a temporary tab that closes back to where you were.
-- **Links from Essentials open regular tabs in the current space**, preserving the Essential.
-  Same-site navigation stays in place, and Command-click opens a background tab. Option-click
-  still explicitly opens Peek. Links arriving from other apps also remain regular tabs.
+- **Links from Essentials open in Peek**, so your inbox stays put behind it and closing the Peek
+  brings you straight back. That covers links that would open a new tab, and links to a different
+  site that would navigate the Essential away. Links within the same site (opening an email) and
+  ⌘-clicks (background tabs) behave normally, and links arriving from other apps (Slack, Mail)
+  always open as normal tabs, even while an Essential is the active tab. You can turn this off in
+  settings.
 - Middle-click closes a tab or unloads a pin. **Clear** on the divider closes the space’s other unpinned tabs, keeping the tab you are viewing.
 - **Jump to a space by number:** "Go to space 1–9" commands exist but have no default keys
   (Chrome lets an extension suggest only 4). Bind them yourself at `chrome://extensions/shortcuts`,
   e.g. ⌃1, ⌃2, ⌃3. Hovering a space dot shows its shortcut once it's bound.
 - **Search (⌘K):** press the search shortcut (or the magnifier at the top of the sidebar) to
-  search the current space’s pinned tabs, shared Essentials, the archive and recent history, or type
+  search open tabs, pinned tabs (by your names), spaces, the archive and recent history, or type
   a URL or a web search. ↑/↓ and ↵ to pick; type `>` for commands (new folder, view archive,
   undo last close); Esc closes. Search appears over the current page; on pages Chrome doesn't let
   extensions touch (`chrome://` pages, the Web Store, PDFs) it opens as a temporary tab instead.
   It only runs when you open it, so sites keep their own ⌘K. Results are ranked by what you typed
   first, then by how often and how recently you visit pages and what you picked before for the
   same search; turn history off in settings, or forget remembered searches there.
-  Ordinary open tabs are excluded as a result category. Web search stays in row two when a
-  matching destination comes first; four rows are visible and more results scroll. Open pins
-  show **Switch to tab** and activate the saved pin, including pins inside collapsed folders.
 - **Folders:** right-click the space name → *New folder…*, or drag a tab or pinned tab onto the
   middle of a folder. Folders nest; right-click one to rename it, add a subfolder, open all its
   tabs, move it, or remove it (its pinned tabs and subfolders move up a level). Opening a pinned
@@ -101,8 +101,9 @@ collapsed by default, so the strip only shows the current space (you can turn th
   its children one level and keeps them open. Children of folder pins stay under their pin;
   Essential children appear under a per-space “From …” header. Links opened by other apps remain
   top-level tabs even when Chrome supplies an opener ID. Tree layout and explicit detach
-  choices survive extension reloads for surviving tabs. Relationships are restored only from
-  Cove’s saved tree; an opener ID alone is never used to infer a parent.
+  choices survive extension reloads within the same browser session. A fresh browser startup
+  clears saved tab IDs so reused IDs cannot attach unrelated tabs. Trees are saved only when
+  relationships or collapse state change, with a short debounce and no tab URLs in the snapshot.
 - **Archive:** tabs you close are kept (the last 500, on this computer, sign-in parameters
   stripped) so you can find and reopen them: the archive button at the bottom of the sidebar, or
   *View archive* in search. Closing from the sidebar or **Clear** shows an Undo toast, and *Reopen
@@ -139,6 +140,7 @@ Keyboard Shortcuts → Mission Control).
 
 - Peek needs access to all sites so it can catch Option-clicks, and search needs it to show its
   panel over a page. Tabs that were already open need a reload before Option-click works.
+  If a content script becomes stale after an extension reload, native link handling takes over.
 - Search asks to read your browsing history so it can suggest pages you've visited. History is
   only read inside the extension's own search page and never sent to websites; turn it off in
   settings to stop using it.
@@ -151,11 +153,11 @@ Keyboard Shortcuts → Mission Control).
   flicker, because the successor is picked before the tab closes.
 - Pins are re-bound to restored tabs by URL after a browser restart. If two restored tabs share a
   pinned tab’s URL, the first one wins. Exact saved URLs and hash routes are matched before
-  broader redirect aliases, so distinct app routes keep their own pins.
+  broader aliases so reordered Dashboard/Reports tabs keep their own pins.
 
 ## Tests
 
-Additional regression coverage for tab trees, search preferences, Clear, and pinned URL menus:
+Additional regression coverage:
 
 ```bash
 node test/search-ranking.mjs
@@ -163,12 +165,13 @@ node test/tab-tree.mjs
 node test/harness.mjs . test/tab-tree.js test/tab-tree-reload.js
 node test/harness.mjs . test/tab-tree-newtab.js test/tab-tree-newtab-reload.js
 node test/harness.mjs . test/external-link-tree.js test/external-link-tree-reload.js
+node test/harness.mjs . test/tree-background-load.js test/tree-background-load-reload.js
 node test/harness.mjs . test/launcher-regressions.mjs
 node test/harness.mjs . test/clear-keeps-active.js
 node test/harness.mjs . test/pin-url-menu.js
-node test/harness.mjs . test/essential-links.mjs
+node test/harness.mjs . test/pin-route-recovery.js test/pin-route-recovery-reload.js
+node test/harness.mjs . test/essential-hash-drift.js
 node test/essential-reload.mjs .
-node test/harness.mjs . test/reconcile-upgrade.js test/reconcile-upgrade-reload.js
 ```
 
 `test/` drives a real headless Chrome with a throwaway profile, so it never touches your profile:

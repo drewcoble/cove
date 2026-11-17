@@ -226,7 +226,7 @@ function setMode(next) {
   mode = next;
   catalog = null;
   input.value = '';
-  input.placeholder = mode === 'archive' ? 'Search closed tabs' : 'Search pins, history, or type a URL';
+  input.placeholder = mode === 'archive' ? 'Search closed tabs' : 'Search tabs, pins, history, or type a URL';
   render(false);
   input.focus();
 }

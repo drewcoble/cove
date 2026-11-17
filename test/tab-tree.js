@@ -9,6 +9,7 @@
   const row=id=>document.querySelector(`.row[data-kind=tab][data-id="${id}"]`);
   try {
     const W=(await chrome.windows.getCurrent()).id;
+    await send('updateSettings',{patch:{peekFromEssentials:false}});
     const control=(await chrome.tabs.getCurrent()).id;
     await send('pinTab',{tabId:control,spaceId:null});
     const main=(await cfg()).spaces[0].id;
@@ -26,6 +27,7 @@
     const detail=await make(article,'Related-article');
     const sibling=await make(root,'Another-article');
     const signed=await make(root,'Signed-link?code=tree-secret#access_token=tree-token');
+    await wait(async()=> (await chrome.storage.local.get('tabTreeState')).tabTreeState?.parents[signed]===root);
     const savedTree=(await chrome.storage.local.get('tabTreeState')).tabTreeState;
     ok(!JSON.stringify(savedTree).includes('tree-secret') && !JSON.stringify(savedTree).includes('tree-token'),'tree persistence redacts sensitive URL tokens');
     await send('closeTabs',{windowId:W,tabIds:[signed]});
@@ -110,6 +112,7 @@
     await wait(async()=> (await rt()).mru[W][0]===essential);
     const collapsedParent=restored[0];
     await send('toggleTabTree',{windowId:W,tabId:collapsedParent,spaceId:main});
+    await wait(async()=> (await chrome.storage.local.get('tabTreeState')).tabTreeState?.collapsed[`${main}:${collapsedParent}`]===true);
     await chrome.storage.local.set({__tabTreeExpect:{detail,collapsedParent,leaf:restored[1],essential,essentialChild,main}});
     ok(true,'tree persistence fixture saved');
   } catch(error){log.push('FAIL '+error.stack);}

@@ -3,6 +3,7 @@
 // Orozco (drewcoble/cove#1).
 
 import { hostname, pinTitle } from './shared.js';
+import { isLauncherOrNewTab } from './search.js';
 
 export function folderPath(folders, folderId) {
   const names = [];
@@ -32,15 +33,31 @@ export function searchCatalog({ config, archive = [], rt, tabs, windowId, exclud
   }
 
   const items = [];
+  const mru = new Map((rt.mru?.[windowId] ?? []).map((id, i) => [id, i]));
+  const rank = tab => mru.get(tab.id) ?? Infinity;
+  const boundPins = new Set();
+  const live = tabs
+    .filter(tab => tab.id !== excludeTabId && !isLauncherOrNewTab(tab.pendingUrl || tab.url, root))
+    .sort((a, b) => rank(a) - rank(b) || (b.lastAccessed || 0) - (a.lastAccessed || 0));
+  for (const tab of live) {
+    const pin = config.pins[rt.tabPin?.[tab.id]];
+    if (pin) boundPins.add(pin.id);
+    const id = tab.pinned ? null : rt.groupSpace?.[tab.groupId] ?? rt.tabSpace?.[tab.id];
+    const url = tab.pendingUrl || tab.url || '';
+    items.push({
+      key: `tab-${tab.id}`, kind: 'tab', id: tab.id,
+      label: pin ? pinTitle(pin, tab) : tab.title || hostname(url) || 'Untitled tab',
+      detail: [hostname(url), spaceName(id), pin && pathOf(pin)].filter(Boolean).join(' · '),
+      searchDetail: `${url} ${spaceName(id)} ${pin ? pathOf(pin) : ''}`,
+      badge: 'Switch to tab', url, spaceId: id, lastAccessed: tab.lastAccessed, mruRank: rank(tab),
+    });
+  }
   for (const pin of Object.values(config.pins)) {
-    if (pin.spaceId != null && pin.spaceId !== spaceId) continue;
-    const tab = tabs.find(t => t.windowId === windowId && rt.tabPin?.[t.id] === pin.id);
+    if (boundPins.has(pin.id)) continue;
     items.push({
       key: `pin-${pin.id}`, kind: 'pin', id: pin.id, label: pinTitle(pin),
       detail: [hostname(pin.url), spaceName(pin.spaceId), pathOf(pin)].filter(Boolean).join(' · '),
-      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${pathOf(pin)}`,
-      badge: tab ? 'Switch to tab' : 'Pinned', url: pin.url, spaceId: pin.spaceId,
-      lastAccessed: tab?.lastAccessed,
+      searchDetail: `${pin.url} ${spaceName(pin.spaceId)} ${pathOf(pin)}`, badge: 'Pinned', url: pin.url, spaceId: pin.spaceId,
     });
   }
   for (const space of config.spaces) {

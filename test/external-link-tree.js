@@ -6,6 +6,7 @@
   const wait=async fn=>{for(let i=0;i<120;i++){if(await fn())return;await new Promise(r=>setTimeout(r,60));}throw new Error('Timed out waiting for confirmed link source');};
   try {
     const windowId=(await chrome.windows.getCurrent()).id;
+    await send('updateSettings',{patch:{peekFromEssentials:false}});
     const controller=(await chrome.tabs.getCurrent()).id;
     await send('pinTab',{tabId:controller,spaceId:null});
     const {config}=await chrome.storage.local.get('config');const spaceId=config.spaces[0].id;
@@ -29,6 +30,7 @@
     await chrome.tabs.update(controller,{active:true});
     await wait(()=>document.querySelector(`[data-kind=tab][data-id="${external.id}"]`));
     ok(document.querySelector(`[data-kind=tab][data-id="${external.id}"]`).dataset.treeDepth==='0','the sidebar renders the external tab at the top level');
+    await wait(async()=> (await chrome.storage.local.get('tabTreeState')).tabTreeState?.parents[linked.id]===parent);
     await chrome.storage.local.set({__externalLinkTree:{external:external.id,essentialExternal:essentialExternal.id,linked:linked.id,parent}});
   }catch(error){log.push('FAIL '+error.stack);}
   return log.join('\n');
