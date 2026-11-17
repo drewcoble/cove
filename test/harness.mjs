@@ -11,19 +11,22 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const [extArg, testFile, phase2File] = process.argv.slice(2);
 const extPath = path.resolve(extArg);
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
+let fixturePort;
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/redirect')) { res.writeHead(302, { Location: '/home' }); return res.end(); }
   res.writeHead(200, { 'content-type': 'text/html' });
   // #far points at another site (localhost vs 127.0.0.1); #blank opens a new tab on the same site.
-  res.end(`<title>Page ${req.url}</title><a id="l" href="/other">x</a> <a id="far" href="http://localhost:${server.address().port}/far">far</a> <a id="blank" href="/opened" target="_blank">blank</a>`);
+  res.end(`<title>Page ${req.url}</title><a id="l" href="/other">x</a> <a id="far" href="http://localhost:${fixturePort}/far">far</a> <a id="blank" href="/opened" target="_blank">blank</a>`);
 });
 await new Promise(r => server.listen(0, '127.0.0.1', r));
-const base = `http://127.0.0.1:${server.address().port}`;
+fixturePort = server.address().port;
+const base = `http://127.0.0.1:${fixturePort}`;
 
 const profile = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'cove-profile-'));
 const chrome = spawn(CHROME, [
@@ -65,8 +68,14 @@ try {
   const { targetId } = await cdp('Target.createTarget', { url: `chrome-extension://${extId}/src/sidepanel.html` });
   const { sessionId } = await cdp('Target.attachToTarget', { targetId, flatten: true });
   await new Promise(r => setTimeout(r, 1500));
-  const script = fs.readFileSync(testFile, 'utf8').replaceAll('__BASE__', base);
-  const res = await cdp('Runtime.evaluate', { expression: script, awaitPromise: true, returnByValue: true }, sessionId);
+  let res;
+  if (testFile.endsWith('.mjs')) {
+    const driver = await import(pathToFileURL(path.resolve(testFile)).href);
+    res = { result: { value: await driver.run({ cdp, sessionId, targetId, extId, base }) } };
+  } else {
+    const script = fs.readFileSync(testFile, 'utf8').replaceAll('__BASE__', base);
+    res = await cdp('Runtime.evaluate', { expression: script, awaitPromise: true, returnByValue: true }, sessionId);
+  }
   if (res.exceptionDetails) { console.error('EXCEPTION', JSON.stringify(res.exceptionDetails, null, 2)); done(1); }
   // A phase-1 script may return JSON { log, payload }; payload is substituted for
   // __PAYLOAD__ in the phase-2 script (used by the export -> reinstall -> import test).

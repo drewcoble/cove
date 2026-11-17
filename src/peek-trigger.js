@@ -11,7 +11,7 @@ let enabled = true;
 // every page. Live changes arrive as a message from the service worker.
 chrome.storage.local.get('peekOnAltClick').then(({ peekOnAltClick }) => {
   enabled = peekOnAltClick ?? true;
-});
+}).catch(() => {});
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (sender.id === chrome.runtime.id && !sender.tab && msg?.type === 'peekPrefs') enabled = !!msg.peekOnAltClick;
 });
@@ -27,6 +27,9 @@ function site(hostname) {
 window.addEventListener(
   'click',
   e => {
+    // Updating/reloading the extension invalidates old content scripts. Leave the
+    // native link and page handlers alone before suppressing anything in that case.
+    if (!chrome.runtime?.id) return;
     // isTrusted: a page must not be able to open windows by synthesizing clicks.
     if (!e.isTrusted || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey) return;
     const link = e.composedPath().find(n => n instanceof HTMLAnchorElement && n.href);

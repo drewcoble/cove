@@ -51,12 +51,19 @@
     const frame = document.createElement('iframe');
     frame.title = 'Cove search';
     frame.src = `${chrome.runtime.getURL('src/launcher.html')}#${new URLSearchParams({ token, mode, view: 'overlay' })}`;
-    frame.addEventListener('load', () => frame.focus());
+    frame.addEventListener('load', () => {
+      if (!host || document.hidden) return;
+      window.focus();
+      frame.focus();
+      requestAnimationFrame(() => { if (host && !document.hidden) frame.focus(); });
+    });
     root.append(style, backdrop, frame);
     document.documentElement.append(host);
     addEventListener('keydown', onKey, true);
     return true;
   }
+
+  document.addEventListener('visibilitychange', () => { if (document.hidden) close(true); });
 
   chrome.runtime.onMessage.addListener((msg, sender) => {
     if (sender.id === chrome.runtime.id && !sender.tab && msg?.type === 'coveCloseSearch') close(false);

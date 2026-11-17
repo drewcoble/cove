@@ -113,8 +113,8 @@ try {
   await sleep(2000);
   const peeks = await api(`chrome.storage.session.get('rt').then(r => Object.keys(r.rt.peeks || {}).length)`);
   const essUrl = await api(`chrome.tabs.get(${essId}).then(t => t.url)`);
-  ok(peeks === 1 || !essUrl.endsWith('/essential'), 'after a reload, clicking an other-site link in an Essential still does something (Peek or navigate): peeks=' + peeks + ' url=' + essUrl);
-  ok(peeks === 1, 'after a reload, the link still opens in Peek');
+  ok(peeks === 0 && !essUrl.endsWith('/essential'), 'after a reload, clicking an other-site link in an Essential still does something (Peek or navigate): peeks=' + peeks + ' url=' + essUrl);
+  ok(peeks === 0, 'after a reload, native links do not become automatic Peeks');
   console.log(log.join('\n'));
   done(/FAIL/.test(log.join()) ? 1 : 0);
 } catch (e) {

@@ -41,3 +41,5 @@ export const isLauncherOrNewTab = (url, extensionRoot) =>
   /^chrome:\/\/(newtab|new-tab-page)\/?(?:[?#].*)?$/.test(url || '') ||
   (url || '').startsWith(extensionRoot) ||
   /^chrome-extension:\/\/[^/]+\/src\/launcher\.html/.test(url || '');
+
+export const isNewTabUrl = url => /^(?:chrome:\/\/(?:newtab|new-tab-page)|about:newtab)\/?(?:[?#].*)?$/.test(url || '');

@@ -104,7 +104,7 @@ function rank(query) {
       .slice(0, 50)
       .map(e => e.item);
   }
-  return rankSearch({ items: getCatalog(), history, memory: data.memory, query, spaceId: currentSpace().id });
+  return rankSearch({ items: getCatalog(), history, memory: data.config.settings.searchHistory ? data.memory : {}, query, spaceId: currentSpace().id });
 }
 
 function favicon(url) {

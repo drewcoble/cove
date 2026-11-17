@@ -61,7 +61,7 @@ collapsed by default, so the strip only shows the current space (you can turn th
   `Ctrl+Shift+←/→` on macOS (`Alt+Shift+←/→` elsewhere). Double-click the space name to rename it.
   Renaming the tab group in Chrome's strip also renames the space.
 - **Essentials grid** sizes itself: up to 3 on one row, 4–10 split over two rows (3/2, 3/3, 4/3 …
-  5/5), then rows of 5.
+  5/5), then rows of 5. The final row stretches to fill the sidebar.
 - **Peek:** Option-click a link, or right-click → *Open link in Peek*, to open it in a floating
   window centered over Chrome. Esc, ✕, or clicking back into the main window closes it; ⤢ or ⌘↩
   opens it as a tab in your current space. It's a popup window rather than an in-page overlay, so
@@ -78,7 +78,7 @@ collapsed by default, so the strip only shows the current space (you can turn th
   ⌘-clicks (background tabs) behave normally, and links arriving from other apps (Slack, Mail)
   always open as normal tabs, even while an Essential is the active tab. You can turn this off in
   settings.
-- Middle-click closes a tab or unloads a pin. **Clear** on the divider closes the space's unpinned tabs.
+- Middle-click closes a tab or unloads a pin. **Clear** on the divider closes the space’s other unpinned tabs, keeping the tab you are viewing.
 - **Jump to a space by number:** "Go to space 1–9" commands exist but have no default keys
   (Chrome lets an extension suggest only 4). Bind them yourself at `chrome://extensions/shortcuts`,
   e.g. ⌃1, ⌃2, ⌃3. Hovering a space dot shows its shortcut once it's bound.
@@ -94,6 +94,16 @@ collapsed by default, so the strip only shows the current space (you can turn th
   middle of a folder. Folders nest; right-click one to rename it, add a subfolder, open all its
   tabs, move it, or remove it (its pinned tabs and subfolders move up a level). Opening a pinned
   tab expands the folders above it.
+- **Tab trees:** tabs opened from links nest beneath their source. Native New Tabs (Command/Ctrl+T)
+  stay at the top level after a search or URL entry. Collapse a branch with its disclosure arrow;
+  selecting a hidden child reveals its ancestors. Drag onto the middle/right of a tab to reparent
+  it, or use **New child tab** / **Move out of parent tab** in its menu. Closing a parent promotes
+  its children one level and keeps them open. Children of folder pins stay under their pin;
+  Essential children appear under a per-space “From …” header. Links opened by other apps remain
+  top-level tabs even when Chrome supplies an opener ID. Tree layout and explicit detach
+  choices survive extension reloads within the same browser session. A fresh browser startup
+  clears saved tab IDs so reused IDs cannot attach unrelated tabs. Trees are saved only when
+  relationships or collapse state change, with a short debounce and no tab URLs in the snapshot.
 - **Archive:** tabs you close are kept (the last 500, on this computer, sign-in parameters
   stripped) so you can find and reopen them: the archive button at the bottom of the sidebar, or
   *View archive* in search. Closing from the sidebar or **Clear** shows an Undo toast, and *Reopen
@@ -130,6 +140,7 @@ Keyboard Shortcuts → Mission Control).
 
 - Peek needs access to all sites so it can catch Option-clicks, and search needs it to show its
   panel over a page. Tabs that were already open need a reload before Option-click works.
+  If a content script becomes stale after an extension reload, native link handling takes over.
 - Search asks to read your browsing history so it can suggest pages you've visited. History is
   only read inside the extension's own search page and never sent to websites; turn it off in
   settings to stop using it.
@@ -141,9 +152,27 @@ Keyboard Shortcuts → Mission Control).
   you close with Cmd+W, so you may see a one-frame flicker. Closing from the sidebar doesn't
   flicker, because the successor is picked before the tab closes.
 - Pins are re-bound to restored tabs by URL after a browser restart. If two restored tabs share a
-  pinned tab's URL, the first one wins.
+  pinned tab’s URL, the first one wins. Exact saved URLs and hash routes are matched before
+  broader aliases so reordered Dashboard/Reports tabs keep their own pins.
 
 ## Tests
+
+Additional regression coverage:
+
+```bash
+node test/search-ranking.mjs
+node test/tab-tree.mjs
+node test/harness.mjs . test/tab-tree.js test/tab-tree-reload.js
+node test/harness.mjs . test/tab-tree-newtab.js test/tab-tree-newtab-reload.js
+node test/harness.mjs . test/external-link-tree.js test/external-link-tree-reload.js
+node test/harness.mjs . test/tree-background-load.js test/tree-background-load-reload.js
+node test/harness.mjs . test/launcher-regressions.mjs
+node test/harness.mjs . test/clear-keeps-active.js
+node test/harness.mjs . test/pin-url-menu.js
+node test/harness.mjs . test/pin-route-recovery.js test/pin-route-recovery-reload.js
+node test/harness.mjs . test/essential-hash-drift.js
+node test/essential-reload.mjs .
+```
 
 `test/` drives a real headless Chrome with a throwaway profile, so it never touches your profile:
 

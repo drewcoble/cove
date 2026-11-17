@@ -1,19 +1,40 @@
-// Ranks search results: what you typed first, then habit (history visits, recency, open
-// tabs, choices you made before for the same query). Runs only inside extension pages.
-// Adapted from a contribution by Julio Orozco (drewcoble/cove#1).
-
 import { navigationUrl, searchScore } from './search.js';
+import { redactUrl } from './shared.js';
+export { searchScore } from './search.js';
 
 const normalized = value => (value || '').trim().toLocaleLowerCase();
-
 export function destinationKey(url) {
+  try { const u = new URL(url); return /^https?:$/.test(u.protocol) && u.pathname === '/' && !u.search && !u.hash ? u.origin : u.href; } catch { return url; }
+}
+// Sanitize URL-shaped input before it becomes local ranking/search memory.
+export function searchMemoryText(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  const url = navigationUrl(text);
+  if (!url) return text.slice(0, 500);
   try {
-    const u = new URL(url);
-    u.hash = '';
-    return u.href.replace(/\/$/, '');
-  } catch {
-    return url;
-  }
+    const original = new URL(url).href;
+    const clean = redactUrl(url, { keepHash: true });
+    if (!clean) return '';
+    const parsed = new URL(clean); parsed.username = ''; parsed.password = '';
+    // Preserve the submitted spelling and URL-vs-search intent unless redaction is needed.
+    if (parsed.href === original) return text.slice(0, 500);
+    const explicitScheme = /^(https?:\/\/|file:\/\/|chrome:\/\/|about:)/i.test(text);
+    return (explicitScheme ? parsed.href : parsed.href.replace(/^https?:\/\//, '')).slice(0, 500);
+  } catch { return ''; }
+}
+
+export function normalizeSearchMemory(memory = {}) {
+  return {
+    searches: (Array.isArray(memory.searches) ? memory.searches : []).map(entry => ({
+      text: searchMemoryText(entry.text), count: entry.count || 1, lastUsed: entry.lastUsed || 0,
+    })).filter(entry => entry.text).slice(0, 50),
+    selections: (Array.isArray(memory.selections) ? memory.selections : []).map(entry => ({
+      query: normalized(searchMemoryText(entry.query)),
+      key: entry.key?.startsWith('search-') ? `search-${normalized(searchMemoryText(entry.key.slice(7)))}`
+        : navigationUrl(entry.key || '') ? destinationKey(searchMemoryText(entry.key)) : entry.key,
+      count: entry.count || 1, lastUsed: entry.lastUsed || 0,
+    })).filter(entry => entry.query && entry.key).slice(0, 100),
+  };
 }
 
 const hostOf = url => {
@@ -36,6 +57,7 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
   const raw = query.trim();
   const commandsOnly = raw.startsWith('>');
   const q = normalized(commandsOnly ? raw.slice(1) : raw);
+  const memoryQuery = normalized(searchMemoryText(raw));
   const url = navigationUrl(raw);
   const question = /^(how|what|why|when|where|who|which|can|does|is|are|should)\b/.test(q) || q.split(/\s+/).length >= 4;
   const candidates = items.map(item => ({ ...item }));
@@ -66,12 +88,12 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
   }
   for (const entry of memory.searches || []) {
     candidates.push({
-      key: `search-${normalized(entry.text)}`, kind: 'navigate', text: entry.text, label: entry.text,
+      key: `search-${normalized(entry.text)}`, kind: 'search', text: entry.text, label: entry.text,
       detail: 'Search again with your default search engine', badge: 'Recent search', icon: 'search',
       count: entry.count, lastVisitTime: entry.lastUsed,
     });
   }
-  const selections = new Map((memory.selections || []).filter(s => s.query === q).map(s => [s.key, s.count]));
+  const selections = new Map((memory.selections || []).filter(s => s.query === memoryQuery).map(s => [s.key, s.count]));
   const scored = [];
   for (const item of candidates) {
     const command = item.kind === 'action' || item.kind === 'space';
@@ -102,7 +124,7 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
     if (!duplicate && !repeated) {
       scored.push({
         score: url ? 240 : question ? 230 : 95,
-        item: { key: 'navigate', kind: 'navigate', text: raw, label: url ? `Go to ${raw}` : `Search for “${raw}”`,
+        item: { key: 'navigate', kind: url ? 'navigate' : 'search', text: raw, label: url ? `Go to ${raw}` : `Search for “${raw}”`,
           detail: 'Open in a new tab in this space', badge: url ? 'Visit' : 'Search web', icon: url ? 'globe' : 'search' },
       });
     }

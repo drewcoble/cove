@@ -1,3 +1,4 @@
+import { buildTabTree } from './tab-tree.js';
 import { COLORS, isDrifted, pinTitle, hostname, isWebUrl } from './shared.js';
 
 // Lucide icon paths (ISC license).
@@ -175,19 +176,33 @@ function render() {
   syncList($('#essentials'), essentials.map(withTab), x => 'p' + x.pin.id, createEssential, updateEssential);
   $('#essentials').style.setProperty('--ess-cols', essentialColumns(essentials.length));
   renderHeader(space);
+  const tree = buildTabTree(tabs, rt, space.id);
   syncList(
     $('#pins'),
-    pinTree(space, withTab),
-    x => (x.folder ? 'f' + x.folder.id : 'p' + x.pin.id),
+    pinTree(space, withTab, tree),
+    x => x.folder ? 'f' + x.folder.id : x.pin ? 'p' + x.pin.id : 't' + x.tab.id,
     x => (x.folder ? createFolderRow() : createRow()),
-    (node, x) => (x.folder ? updateFolderRow(node, x) : updateNestedPinRow(node, x)),
+    (node, x) => {
+      if (x.folder) return updateFolderRow(node, x);
+      if (x.pin) {
+        updateNestedPinRow(node, x);
+        decorateTreeRow(node, { ...tree.info(x.tab?.id), tab: x.tab, depth: x.depth });
+      } else { updateTabRow(node, x.tab); decorateTreeRow(node, x); }
+    },
   );
   syncList(
     $('#tabs'),
-    tabs.filter(t => !t.pinned && !boundPinOf(t) && spaceOf(t) === space.id),
-    t => 't' + t.id,
+    [...tree.essentials.flatMap(tab => [{ tab, depth: 0, essentialRoot: true, ...tree.info(tab.id) }, ...tree.children(tab.id, 1)]), ...tree.rows],
+    entry => (entry.essentialRoot ? 'root-' : 't') + entry.tab.id,
     createRow,
-    updateTabRow,
+    (node, entry) => {
+      updateTabRow(node, entry.tab);
+      decorateTreeRow(node, entry);
+      if (entry.essentialRoot) {
+        node.dataset.kind = 'tree-root'; node.draggable = false;
+        setText(node.querySelector('.title'), `From ${pinTitle(config.pins[rt.tabPin[entry.tab.id]] || {}, entry.tab)}`);
+      }
+    },
   );
   syncList($('#spaces'), config.spaces, s => 's' + s.id, createSpaceButton, (node, s) =>
     updateSpaceButton(node, s, s.id === space.id),
@@ -276,13 +291,16 @@ function folderSubtree(folderId) {
   return ids;
 }
 
-function pinTree(space, withTab) {
+function pinTree(space, withTab, tree) {
   const folders = spaceFolders(space.id);
   const pins = space.pins.filter(id => config.pins[id]).map(withTab);
   const items = [];
   const placed = new Set();
   const visit = (parentId, depth) => {
-    for (const x of pins) if ((x.pin.folderId ?? null) === parentId) items.push({ ...x, depth });
+    for (const x of pins) if ((x.pin.folderId ?? null) === parentId) {
+      items.push({ ...x, depth });
+      if (x.tab) items.push(...tree.children(x.tab.id, depth + 1));
+    }
     for (const folder of folders) {
       if ((folder.parentId ?? null) !== parentId || placed.has(folder.id)) continue;
       placed.add(folder.id);
@@ -333,6 +351,43 @@ function createRow() {
     <button class="audio icon-btn sm"></button>
     <button class="close icon-btn sm">${svg('x')}</button>`;
   return node;
+}
+
+function decorateTreeRow(node, entry) {
+  const tab = entry.tab;
+  const count = entry.childCount || 0;
+  const depth = entry.depth || 0;
+  let toggle = node.querySelector('.tree-toggle');
+  if (!toggle) {
+    toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'tree-toggle';
+    node.prepend(toggle);
+    const badge = document.createElement('span'); badge.className = 'tree-count';
+    node.insertBefore(badge, node.querySelector('.close'));
+  }
+  node.classList.add('tree-row');
+  node.classList.toggle('tree-child', depth > 0);
+  node.classList.toggle('tree-root', !!entry.essentialRoot);
+  node.style.paddingInlineStart = `${8 + Math.min(depth, 8) * 16}px`;
+  node.style.setProperty('--tree-depth', Math.min(depth, 8));
+  if (tab) node.dataset.treeTabId = tab.id; else delete node.dataset.treeTabId;
+  node.dataset.treeParentId = entry.parentId ?? '';
+  toggle.hidden = false; toggle.disabled = !count; toggle.style.visibility = count ? 'visible' : 'hidden'; toggle.textContent = entry.collapsed ? '▸' : '▾';
+  toggle.setAttribute('aria-label', `${entry.collapsed ? 'Expand' : 'Collapse'} ${count} child tab${count === 1 ? '' : 's'}`);
+  toggle.setAttribute('aria-expanded', String(!entry.collapsed));
+  const badge = node.querySelector('.tree-count'); badge.hidden = !count; badge.textContent = count;
+  badge.title = `${count} child tab${count === 1 ? '' : 's'}`;
+  node.dataset.treeDepth = depth;
+}
+function toggleTree(node) {
+  return send('toggleTabTree', { windowId, tabId: +node.dataset.treeTabId, spaceId: activeSpaceId() });
+}
+function ordinaryTabClick(e, node) {
+  const tabId = +node.dataset.id;
+  if (e.target.closest('.tree-toggle')) return toggleTree(node);
+  if (node.dataset.kind === 'tree-root') return chrome.tabs.update(tabId, { active: true });
+  if (e.target.closest('.close')) return send('closeTabs', { windowId, tabIds: [tabId] });
+  if (e.target.closest('.audio')) return toggleMute(tabs.find(t => t.id === tabId));
+  chrome.tabs.update(tabId, { active: true });
 }
 
 function setAudio(node, tab) {
@@ -465,7 +520,10 @@ $('#essentials').addEventListener('click', e => {
 
 $('#essentials').addEventListener('auxclick', e => {
   const node = e.target.closest('.ess');
-  if (node && e.button === 1) send('unloadPin', { windowId, pinId: node.dataset.id });
+  if (node && e.button === 1) {
+    if (node.dataset.kind === 'tab') send('closeTabs', { windowId, tabIds: [+node.dataset.id] });
+    else send('unloadPin', { windowId, pinId: node.dataset.id });
+  }
 });
 
 $('#pins').addEventListener('click', e => {
@@ -476,6 +534,8 @@ $('#pins').addEventListener('click', e => {
   }
   const node = e.target.closest('.row');
   if (!node || node.dataset.editing) return;
+  if (node.dataset.kind === 'tab') return ordinaryTabClick(e, node);
+  if (e.target.closest('.tree-toggle')) return toggleTree(node);
   const pinId = node.dataset.id;
   if (e.target.closest('.close')) return send('unloadPin', { windowId, pinId });
   if (e.target.closest('.audio')) return toggleMute(boundTabOf(pinId));
@@ -491,15 +551,12 @@ $('#pins').addEventListener('auxclick', e => {
 $('#tabs').addEventListener('click', e => {
   const node = e.target.closest('.row');
   if (!node) return;
-  const tabId = +node.dataset.id;
-  if (e.target.closest('.close')) return send('closeTabs', { windowId, tabIds: [tabId] });
-  if (e.target.closest('.audio')) return toggleMute(tabs.find(t => t.id === tabId));
-  chrome.tabs.update(tabId, { active: true });
+  ordinaryTabClick(e, node);
 });
 
 $('#tabs').addEventListener('auxclick', e => {
   const node = e.target.closest('.row');
-  if (node && e.button === 1) send('closeTabs', { windowId, tabIds: [+node.dataset.id] });
+  if (node && node.dataset.kind !== 'tree-root' && e.button === 1) send('closeTabs', { windowId, tabIds: [+node.dataset.id] });
 });
 
 $('#new-tab').onclick = () => send('newTab', { windowId, spaceId: activeSpaceId() });
@@ -550,6 +607,7 @@ document.addEventListener('contextmenu', e => {
   if (e.target.closest('#space-header')) return openMenu(e, spaceMenu(activeSpaceId()));
   const node = e.target.closest('[data-kind]');
   if (!node) return;
+  if (node.dataset.kind === 'tree-root') return openMenu(e, tabTreeItems(+node.dataset.id));
   if (node.dataset.kind === 'tab') openMenu(e, tabMenu(+node.dataset.id));
   else if (node.dataset.kind === 'folder') openMenu(e, folderMenu(node.dataset.id, node));
   else openMenu(e, pinMenu(node.dataset.id, node));
@@ -609,12 +667,23 @@ function folderMenu(folderId, node) {
   ];
 }
 
+function tabTreeItems(tabId) {
+  const tree = buildTabTree(tabs, rt, activeSpaceId());
+  const count = tree.info(tabId).childCount;
+  return [
+    { icon: 'plus', label: 'New child tab', run: () => send('newChildTab', { tabId }) },
+    count && { label: tree.info(tabId).collapsed ? 'Expand child tabs' : 'Collapse child tabs', run: () => send('toggleTabTree', { windowId, tabId, spaceId: activeSpaceId() }) },
+    rt.tabParent?.[tabId] != null && { label: 'Move out of parent tab', run: () => send('setTabParent', { tabId, parentId: null }) },
+  ].filter(Boolean);
+}
+
 function tabMenu(tabId) {
   const tab = tabs.find(t => t.id === tabId);
   if (!tab) return [];
   const spaceId = activeSpaceId();
   const muted = !!tab.mutedInfo?.muted;
   return [
+    ...tabTreeItems(tabId), '-',
     { icon: 'pin', label: 'Pin tab', run: () => send('pinTab', { tabId, spaceId }) },
     { icon: 'star', label: 'Add to Essentials', run: () => send('pinTab', { tabId, spaceId: null }) },
     ...folderItems(spaceId, null, folderId => act('pinTab', { tabId, spaceId, folderId }), 'Pin'),
@@ -642,6 +711,7 @@ function pinMenu(pinId, node) {
       label: 'Rename…',
       run: () => (essential ? renamePinPopover(node, pin) : renamePinInline(node, pin)),
     },
+    ...(tab ? tabTreeItems(tab.id).filter(item => item.label !== 'Move out of parent tab') : []),
     { icon: 'link', label: 'Edit pinned URL…', run: () => editPinUrl(node, pin) },
     drifted && '-',
     drifted && { icon: 'rotateCcw', label: 'Go back to pinned URL', run: () => send('resetPin', { windowId, pinId }) },
@@ -1041,8 +1111,8 @@ importPicker.addEventListener('change', async () => {
 const zones = [$('#essentials'), $('#pins'), $('#tabs')];
 
 function clearIndicators() {
-  document.querySelectorAll('.drop-before, .drop-end, .drop-target').forEach(n => {
-    n.classList.remove('drop-before', 'drop-end', 'drop-target');
+  document.querySelectorAll('.drop-before, .drop-end, .drop-target, .drop-into-tree').forEach(n => {
+    n.classList.remove('drop-before', 'drop-end', 'drop-target', 'drop-into-tree');
   });
 }
 
@@ -1081,7 +1151,7 @@ function dropPosition(zone, e) {
 
 document.addEventListener('dragstart', e => {
   const node = e.target.closest?.('[data-kind]');
-  if (!node || node.dataset.editing) return;
+  if (!node || node.dataset.editing || !['tab', 'pin'].includes(node.dataset.kind)) return;
   drag = { kind: node.dataset.kind, id: node.dataset.kind === 'tab' ? +node.dataset.id : node.dataset.id, node };
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', '');
@@ -1092,11 +1162,22 @@ document.addEventListener('dragstart', e => {
 });
 document.addEventListener('dragend', endDrag);
 
+function treeDropTarget(zone, e) {
+  if (drag?.kind !== 'tab') return null;
+  const row = e.target.closest('.row[data-tree-tab-id]');
+  if (!row || !zone.contains(row) || +row.dataset.treeTabId === drag.id) return null;
+  const rect = row.getBoundingClientRect();
+  if (e.clientX < rect.left + 40 || e.clientY < rect.top + rect.height * .25 || e.clientY > rect.bottom - rect.height * .25) return null;
+  return row;
+}
+
 for (const zone of zones) {
   zone.addEventListener('dragover', e => {
     if (!drag) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
+    const parent = treeDropTarget(zone, e);
+    if (parent) { clearIndicators(); parent.classList.add('drop-into-tree'); return; }
     const into = folderTarget(zone, e);
     const { beforeNode } = dropPosition(zone, e);
     clearIndicators();
@@ -1115,12 +1196,14 @@ for (const zone of zones) {
 }
 
 function handleDrop(zone, e) {
+  const parent = treeDropTarget(zone, e);
+  if (parent) return act('setTabParent', { tabId: drag.id, parentId: +parent.dataset.treeTabId });
   const { index, beforeNode } = dropPosition(zone, e);
   const spaceId = activeSpaceId();
   const { kind, id } = drag;
   if (zone.id === 'tabs') {
     const beforeTabId = beforeNode ? +beforeNode.dataset.id : null;
-    if (kind === 'tab') send('moveTab', { tabId: id, spaceId, beforeTabId });
+    if (kind === 'tab') act('setTabParent', { tabId: id, parentId: beforeNode?.dataset.treeParentId ? +beforeNode.dataset.treeParentId : null, beforeTabId });
     else send('unpin', { pinId: id, windowId, spaceId, beforeTabId, place: true });
     return;
   }
