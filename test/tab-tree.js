@@ -15,9 +15,12 @@
     const root=await send('newTab',{windowId:W,spaceId:main,url:'__BASE__/Wikipedia'});
     await wait(async()=> (await chrome.tabs.get(root)).status==='complete');
     const make=async(opener,path)=>{
-      const t=await chrome.tabs.create({windowId:W,openerTabId:opener,url:'__BASE__/'+path,active:false});
-      await wait(async()=> (await rt()).tabParent[t.id]===opener);
-      return t.id;
+      await wait(async()=> (await chrome.tabs.get(opener)).status==='complete');
+      const url='__BASE__/'+path;
+      await chrome.scripting.executeScript({target:{tabId:opener},func:url=>{const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener';document.body.append(a);a.click();a.remove();},args:[url]});
+      let child;
+      await wait(async()=>{child=(await chrome.tabs.query({windowId:W})).find(t=>t.url===url||t.pendingUrl===url);return child && (await rt()).tabParent[child.id]===opener;});
+      return child.id;
     };
     const article=await make(root,'Article');
     const detail=await make(article,'Related-article');
@@ -102,10 +105,11 @@
     const reopened=await chrome.tabs.query({windowId:W});
     const restored=['Undo-parent','Undo-child'].map(path=>reopened.find(t=>t.url==='__BASE__/'+path || t.pendingUrl==='__BASE__/'+path)?.id);
     ok(restoredCount===2 && (await rt()).tabParent[restored[1]]===restored[0],'undo restores archived parent/child relationships in a batch');
-    await chrome.tabs.update(control,{active:true});
+    await wait(async()=> (await Promise.all(restored.map(id=>chrome.tabs.get(id)))).every(t=>t.status==='complete'));
+    await chrome.tabs.update(essential,{active:true});
+    await wait(async()=> (await rt()).mru[W][0]===essential);
     const collapsedParent=restored[0];
     await send('toggleTabTree',{windowId:W,tabId:collapsedParent,spaceId:main});
-    await chrome.tabs.update(essential,{active:true});
     await chrome.storage.local.set({__tabTreeExpect:{detail,collapsedParent,leaf:restored[1],essential,essentialChild,main}});
     ok(true,'tree persistence fixture saved');
   } catch(error){log.push('FAIL '+error.stack);}

@@ -20,8 +20,8 @@
     await chrome.tabs.update(control,{active:true});
     await wait(()=>document.querySelector(`[data-kind=tab][data-id="${fresh.id}"]`));
     ok(document.querySelector(`[data-kind=tab][data-id="${fresh.id}"]`).dataset.treeDepth==='0','the looked-up New Tab is shown at the top level');
-    const link=await chrome.tabs.create({windowId:W,url:'__BASE__/Link-result',openerTabId:parent,active:false});
-    await wait(async()=> (await rt()).tabParent[link.id]===parent);
+    await chrome.scripting.executeScript({target:{tabId:parent},func:url=>{const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener';document.body.append(a);a.click();a.remove();},args:['__BASE__/Link-result']});
+    await wait(async()=>{const link=(await chrome.tabs.query({windowId:W})).find(t=>t.url==='__BASE__/Link-result'||t.pendingUrl==='__BASE__/Link-result');return link && (await rt()).tabParent[link.id]===parent;});
     ok(true,'tabs opened directly from links still become children');
     const explicit=await send('newChildTab',{tabId:parent});
     await chrome.tabs.update(explicit,{url:'__BASE__/Explicit-child-result'});

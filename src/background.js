@@ -527,15 +527,29 @@ function revealTabParents(tab) {
   }
   touchRt();
 }
-async function adoptTreeOpener(tab) {
-  if (rt.tabParent[tab.id] == null && isNewTabUrl(tab.pendingUrl || tab.url, chrome.runtime.getURL(''))) {
-    rt.treeDetached[tab.id] = true; touchRt(); return;
-  }
-  if (!/^(https?:|file:)/i.test(tab.pendingUrl || tab.url || '')) return;
-  if (rt.tabParent[tab.id] != null || rt.treeDetached[tab.id] || tab.openerTabId == null) return;
-  const parent = await getTab(tab.openerTabId);
-  if (validParent(tab, parent, rt)) { rt.tabParent[tab.id] = parent.id; touchRt(); }
-}
+// openerTabId is only a browser hint: external apps can inherit the active tab as
+// their opener. Only a renderer-created navigation target confirms a link's source.
+chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) =>
+  enqueue(async () => {
+    const [tab, source] = await Promise.all([getTab(tabId), getTab(sourceTabId)]);
+    if (!tab || !source || tab.windowId !== source.windowId || !(await isNormalWindow(tab.windowId))) return;
+    if (tab.pinned || rt.tabPin[tabId] || isPeekTab(tabId) || isPeekTab(sourceTabId)) return;
+    if ((tab.pendingUrl || tab.url || '').startsWith('chrome-extension:') ||
+        (source.pendingUrl || source.url || '').startsWith('chrome-extension:')) return;
+    if (rt.tabParent[tabId] != null || rt.treeDetached[tabId]) return;
+    const spaceId = tabSpaceOf(source) || windowSpace(tab.windowId);
+    if (tabSpaceOf(tab) !== spaceId) await putTabInSpace(tab, spaceId);
+    const current = await getTab(tabId);
+    if (!validParent(current, source, rt)) return;
+    rt.tabParent[tabId] = sourceTabId;
+    touchRt();
+    if (current.active) {
+      setWindowSpace(current.windowId, spaceId);
+      revealTabParents(current);
+      await applyCollapse(current.windowId);
+    }
+  }),
+);
 
 // ---------------------------------------------------------------------------------------
 // Message handlers (called from the side panel)
@@ -1249,6 +1263,8 @@ Object.assign(handlers, {
     }
     const spaceId = windowSpace(source.windowId);
     const tab = await createTabInSpace(source.windowId, spaceId, { url, openerTabId: source.id });
+    rt.tabParent[tab.id] = source.id;
+    revealTabParents(tab);
     setWindowSpace(source.windowId, spaceId);
     await applyCollapse(source.windowId);
     return tab.id;
@@ -1298,7 +1314,6 @@ async function onTabCreated(tabId, createdUrl) {
   if (grouped) {
     // Chrome already put it in a space's group (e.g. link opened from a grouped tab).
     rt.tabSpace[tab.id] = grouped;
-    await adoptTreeOpener(tab);
     if (tab.active) revealTabParents(tab);
     rememberTab(tab);
     touchRt();
@@ -1309,7 +1324,6 @@ async function onTabCreated(tabId, createdUrl) {
     (!fromEssential && tab.openerTabId != null && rt.tabSpace[tab.openerTabId]) ||
     windowSpace(tab.windowId);
   await putTabInSpace(tab, spaceId);
-  await adoptTreeOpener(tab);
   if (tab.active) revealTabParents(tab);
   rememberTab(tab);
   if (tab.active) setWindowSpace(tab.windowId, spaceId);
@@ -1340,7 +1354,7 @@ async function onTabUpdated(tabId, ci) {
     if (ci.splitViewId === chrome.tabs.SPLIT_VIEW_ID_NONE) await handlers.peekExpand({ tabId });
     return;
   }
-  if ('url' in ci) { await adoptTreeOpener(tab); if (tab.active) revealTabParents(tab); touchRt(); }
+  if ('url' in ci) { if (tab.active) revealTabParents(tab); touchRt(); }
   const pinId = rt.tabPin[tabId];
   const pin = pinId ? config.pins[pinId] : null;
   if (pinId && !pin) unbindTab(tabId);
@@ -1946,7 +1960,6 @@ async function reconcile() {
   }
 
   await pruneTabTree();
-  if (initial) for (const tab of liveTabs.values()) await adoptTreeOpener(tab);
   for (const tab of liveTabs.values()) if (tab.active) { revealTabParents(tab); revealPinFolders(rt.tabPin[tab.id]); }
 
   // First install: drop the placeholder "Main" space if existing groups were adopted instead.

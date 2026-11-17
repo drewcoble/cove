@@ -99,9 +99,10 @@ collapsed by default, so the strip only shows the current space (you can turn th
   selecting a hidden child reveals its ancestors. Drag onto the middle/right of a tab to reparent
   it, or use **New child tab** / **Move out of parent tab** in its menu. Closing a parent promotes
   its children one level and keeps them open. Children of folder pins stay under their pin;
-  Essential children appear under a per-space “From …” header. Tree layout and explicit detach
-  choices survive extension reloads for surviving tabs. Browser restoration can recover opener
-  relationships when Chrome retains them.
+  Essential children appear under a per-space “From …” header. Links opened by other apps remain
+  top-level tabs even when Chrome supplies an opener ID. Tree layout and explicit detach
+  choices survive extension reloads for surviving tabs. Relationships are restored only from
+  Cove’s saved tree; an opener ID alone is never used to infer a parent.
 - **Archive:** tabs you close are kept (the last 500, on this computer, sign-in parameters
   stripped) so you can find and reopen them: the archive button at the bottom of the sidebar, or
   *View archive* in search. Closing from the sidebar or **Clear** shows an Undo toast, and *Reopen
@@ -161,6 +162,7 @@ node test/search-ranking.mjs
 node test/tab-tree.mjs
 node test/harness.mjs . test/tab-tree.js test/tab-tree-reload.js
 node test/harness.mjs . test/tab-tree-newtab.js test/tab-tree-newtab-reload.js
+node test/harness.mjs . test/external-link-tree.js test/external-link-tree-reload.js
 node test/harness.mjs . test/launcher-regressions.mjs
 node test/harness.mjs . test/clear-keeps-active.js
 node test/harness.mjs . test/pin-url-menu.js

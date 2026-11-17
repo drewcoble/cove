@@ -15,7 +15,8 @@
     "clipboardWrite",
     "scripting",
     "contextMenus",
-    "history"
+    "history",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"
