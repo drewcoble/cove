@@ -1193,6 +1193,19 @@ async function rememberSearchChoice({ kind, id, text, query, url }) {
   await chrome.storage.local.set({ searchMemory: memory });
 }
 
+// Opens the launcher as a temporary tab next to where search was opened; closing it returns
+// to that tab. Used where nothing can be injected, and when the overlay can't get focus.
+async function openLauncherTab(token, session) {
+  session.overlay = false;
+  session.returnTabId = session.tabId;
+  const hash = new URLSearchParams({ token, mode: session.mode, view: 'tab' });
+  const launcherTab = await createTabInSpace(session.windowId, windowSpace(session.windowId), {
+    url: chrome.runtime.getURL(`${LAUNCHER}#${hash}`),
+  });
+  session.launcherTabId = launcherTab.id;
+  touchRt();
+}
+
 Object.assign(handlers, {
   // Opens search over the active tab of `windowId`, or closes it if it's already open there.
   async openSearch({ windowId, mode = 'all' }) {
@@ -1216,14 +1229,18 @@ Object.assign(handlers, {
       });
       if (!result) throw new Error('overlay unavailable');
     } catch {
-      session.overlay = false;
-      session.returnTabId = tab.id;
-      const spaceId = windowSpace(windowId);
-      const hash = new URLSearchParams({ token, mode: session.mode, view: 'tab' });
-      const launcherTab = await createTabInSpace(windowId, spaceId, { url: chrome.runtime.getURL(`${LAUNCHER}#${hash}`) });
-      session.launcherTabId = launcherTab.id;
-      touchRt();
+      await openLauncherTab(token, session);
     }
+  },
+
+  // From an overlay launcher that couldn't get keyboard focus: Chrome's own UI (e.g. the
+  // address bar after closing a New Tab) still holds it, and a page can't take it back.
+  // Swap the overlay for the tab launcher, which does get focus, keeping the same token.
+  async launcherFallback({ token }, sender) {
+    const session = searchSession(token, sender);
+    if (!session.overlay) return;
+    await chrome.tabs.sendMessage(session.tabId, { type: 'coveCloseSearch' }, { frameId: 0 }).catch(() => {});
+    await openLauncherTab(token, session);
   },
 
   async launcherHello({ token }, sender) {

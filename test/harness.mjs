@@ -49,9 +49,22 @@ chrome.stdio[4].on('data', d => {
       const { resolve, reject } = pending.get(msg.id);
       pending.delete(msg.id);
       msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
+    } else if (msg.method === 'Target.attachedToTarget') {
+      onAttached(msg.params);
     }
   }
 });
+
+// Headless windows never have OS focus, so pages and frames report document.hasFocus() as
+// false. Emulate a focused window on every page and frame (as a real browser in front would
+// be), so behaviour that depends on focus, like the search overlay, is tested as users see it.
+async function onAttached({ sessionId, targetInfo, waitingForDebugger }) {
+  if (targetInfo.type === 'page' || targetInfo.type === 'iframe') {
+    await cdp('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId).catch(() => {});
+    await cdp('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId).catch(() => {});
+  }
+  if (waitingForDebugger) await cdp('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
+}
 const cdp = (method, params = {}, sessionId) =>
   new Promise((resolve, reject) => {
     const msgId = ++id;
@@ -63,6 +76,7 @@ const done = code => { try { chrome.kill(); } catch {} server.close(); setTimeou
 setTimeout(() => { console.error('TIMEOUT\n', stderr.slice(-2000)); done(2); }, 90000);
 
 try {
+  await cdp('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
   const { id: extId } = await cdp('Extensions.loadUnpacked', { path: extPath });
   await new Promise(r => setTimeout(r, 1500));
   const { targetId } = await cdp('Target.createTarget', { url: `chrome-extension://${extId}/src/sidepanel.html` });

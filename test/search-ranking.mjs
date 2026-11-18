@@ -37,3 +37,16 @@ for (const text of ['localhost', 'localhost:3000', 'example.com', 'Example.COM',
 assert.equal(searchMemoryText('example.com/callback?code=secret&view=inbox'), 'example.com/callback?view=inbox');
 assert.equal(searchMemoryText('localhost:3000/callback?token=secret'), 'localhost:3000/callback');
 console.log('PASS hash-route drift and redirect aliases; exact recent query text with URL-token redaction');
+// A multi-word search whose words all appear in frequently visited history pages must still
+// offer "Search for …" (or the matching recent search) within the first two rows.
+const gtaHistory = Array.from({ length: 10 }, (_, i) => ({
+  id: 'g' + i, url: `https://games${i}.example/gta-3-guide-${i}`, title: `GTA 3 walkthrough part ${i}`, visitCount: 40, lastVisitTime: now,
+}));
+const multiWord = rankSearch({ items: [], history: gtaHistory, query: 'gta 3', spaceId: 'work', now });
+assert.ok(multiWord.slice(0, 2).some(item => item.badge === 'Search web' && item.text === 'gta 3'), 'web search is in the first two rows: ' + multiWord.map(x => x.badge).join(', '));
+assert.equal(multiWord[0].badge, 'History', 'the best history match still comes first when it outscores the search row');
+const recent = rankSearch({ items: [], history: gtaHistory, query: 'gta 3', spaceId: 'work', now,
+  memory: { searches: [{ text: 'gta 3', count: 1, lastUsed: now - 40 * 86400000 }] } });
+assert.ok(recent.slice(0, 2).some(item => item.badge === 'Recent search' && item.text === 'gta 3'), 'a matching recent search stands in for the web search row');
+assert.equal(rankSearch({ items: [], history: [], query: 'gta', spaceId: 'work', now })[0].badge, 'Search web', 'with nothing better, web search is first');
+console.log('PASS web search stays in the first two rows for multi-word queries');

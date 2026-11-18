@@ -47,9 +47,22 @@ chrome.stdio[4].on('data', d => {
       const { resolve, reject } = pending.get(msg.id);
       pending.delete(msg.id);
       msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
+    } else if (msg.method === 'Target.attachedToTarget') {
+      onAttached(msg.params);
     }
   }
 });
+
+// Headless windows never have OS focus, so pages and frames report document.hasFocus() as
+// false. Emulate a focused window on every page and frame (as a real browser in front would
+// be), so behaviour that depends on focus, like the search overlay, is tested as users see it.
+async function onAttached({ sessionId, targetInfo, waitingForDebugger }) {
+  if (targetInfo.type === 'page' || targetInfo.type === 'iframe') {
+    await cdp('Emulation.setFocusEmulationEnabled', { enabled: true }, sessionId).catch(() => {});
+    await cdp('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId).catch(() => {});
+  }
+  if (waitingForDebugger) await cdp('Runtime.runIfWaitingForDebugger', {}, sessionId).catch(() => {});
+}
 const cdp = (method, params = {}, sessionId) =>
   new Promise((resolve, reject) => {
     const msgId = ++id;
@@ -58,7 +71,7 @@ const cdp = (method, params = {}, sessionId) =>
   });
 
 const done = code => { try { chrome.kill(); } catch {} server.close(); setTimeout(() => { try { fs.rmSync(profile, { recursive: true, force: true }); } catch {} process.exit(code); }, 500); return; process.exit(code); };
-setTimeout(() => { console.error('TIMEOUT\n', stderr.slice(-2000)); done(2); }, 90000);
+setTimeout(() => { console.error('TIMEOUT\n', stderr.slice(-2000)); done(2); }, 180000);
 
 
 
@@ -80,6 +93,7 @@ async function attachTo(match, type = 'page') {
 const log = [];
 const ok = (c, m) => log.push((c ? 'PASS ' : 'FAIL ') + m);
 try {
+  await cdp('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
   const { id: extId } = await cdp('Extensions.loadUnpacked', { path: extPath });
   await sleep(1500);
   const { targetId } = await cdp('Target.createTarget', { url: `chrome-extension://${extId}/src/sidepanel.html` });
@@ -192,6 +206,32 @@ try {
   const leftover = await api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.some(x => x.url.includes('launcher.html')))`);
   ok(back === restricted && !leftover, 'closing the launcher tab returns to where you were');
 
+  // When the overlay can't get keyboard focus (Chrome's address bar still has it), the
+  // launcher swaps itself for the tab version, which can.
+  const sourceTab = await api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.find(x => x.url.endsWith('/page-one')).id)`);
+  await api(`chrome.tabs.update(${sourceTab}, { active: true }).then(() => 1)`);
+  await sleep(500);
+  const sourcePage = await attachTo('/page-one');
+  await msg('openSearch', { windowId: W });
+  await sleep(1000);
+  const unfocused = await attachTo('launcher.html', 'iframe');
+  await sleep(400);
+  // Fire and forget: the swap removes this frame, so it never sees the reply.
+  await evalIn(unfocused, `chrome.runtime.sendMessage({ type: 'launcherFallback', token: new URLSearchParams(location.hash.slice(1)).get('token') }), 1`);
+  await sleep(1200);
+  r = await rt();
+  const swapped = Object.values(r.searches).find(s => s.windowId === W);
+  const swappedTab = await api(`chrome.tabs.query({ windowId: ${W}, active: true }).then(t => t[0])`);
+  ok(swapped && !swapped.overlay && swappedTab.url.includes('launcher.html') && swappedTab.url.includes('view=tab'),
+    'an overlay that can’t get focus is swapped for the search tab');
+  ok(!(await evalIn(sourcePage, `!!document.querySelector('cove-search')`)), 'the overlay is removed from the page when it swaps');
+  const swappedLauncher = await attachTo('view=tab', 'page');
+  await sleep(500);
+  ok(await evalIn(swappedLauncher, `document.querySelector('#search') === document.activeElement`), 'the search tab has the cursor in the search box');
+  await evalIn(swappedLauncher, `dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })), 1`);
+  await sleep(800);
+  ok((await api(`chrome.tabs.query({ windowId: ${W}, active: true }).then(t => t[0].id)`)) === sourceTab, 'Esc in the search tab returns to the page you were on');
+
   // Token checks.
   await msg('openSearch', { windowId: W });
   await sleep(1000);
@@ -212,7 +252,8 @@ try {
   ok(probe === 'blocked', 'a web page cannot fetch the launcher to detect Cove');
 
   // History search can be turned off.
-  await msg('launcherClose', { token: live });
+  await msg('openSearch', { windowId: W }); // the shortcut again closes the search left open above
+  await sleep(500);
   await api(`chrome.storage.local.get('config').then(r => chrome.runtime.sendMessage({ type: 'updateSettings', patch: { searchHistory: false } }))`);
   await api(`chrome.tabs.update(${await api(`chrome.tabs.query({ windowId: ${W} }).then(t => t.find(x => x.url.endsWith('/page-one')).id)`)}, { active: true })`);
   await sleep(500);

@@ -312,12 +312,12 @@ addEventListener('keydown', event => {
     event.preventDefault();
     execute(choices[selected]);
   } else if (event.key === 'Escape') {
+    // Esc clears what's typed; Esc on an empty box closes search. (The folder form handles
+    // its own Esc.)
     event.preventDefault();
     if (input.value) {
       input.value = '';
       render(false);
-    } else if (mode === 'archive' && ctx.mode !== 'archive') {
-      setMode('all');
     } else {
       close();
     }
@@ -345,6 +345,11 @@ try {
   render(false);
   input.focus();
   addEventListener('focus', () => $('#folder-form').hidden && input.focus());
+  // Over a page, keyboard focus can be stuck in Chrome's own UI (e.g. the address bar after
+  // closing a New Tab), which a frame can't take it from. Switch to the tab launcher then.
+  if (view === 'overlay') {
+    setTimeout(() => !document.hasFocus() && call('launcherFallback').catch(() => {}), 300);
+  }
   chrome.storage.onChanged.addListener(changes => {
     if (changes.config && changes.config.newValue?.settings?.searchHistory !== data.config.settings.searchHistory) {
       loadData().then(loadHistory).then(() => render());

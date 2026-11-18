@@ -129,5 +129,12 @@ export function rankSearch({ items, history = [], memory = {}, query = '', space
       });
     }
   }
-  return scored.sort((a, b) => b.score - a.score || a.item.key.localeCompare(b.item.key)).slice(0, limit).map(entry => entry.item);
+  const ranked = scored.sort((a, b) => b.score - a.score || a.item.key.localeCompare(b.item.key));
+  // Always keep a way to search the web for exactly what was typed within the first two rows.
+  // Multi-word queries that match many visited pages would otherwise push it out of view.
+  if (q && !commandsOnly && !url) {
+    const web = ranked.findIndex(({ item }) => item.key === 'navigate' || (item.badge === 'Recent search' && normalized(item.text) === q));
+    if (web > 1) ranked.splice(1, 0, ...ranked.splice(web, 1));
+  }
+  return ranked.slice(0, limit).map(entry => entry.item);
 }
